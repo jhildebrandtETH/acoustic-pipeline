@@ -1,0 +1,3 @@
+[submodule "acousticSolver"]
+	path = acousticSolver
+	url = https://github.com/Frxljord/FoamAcoustics.git

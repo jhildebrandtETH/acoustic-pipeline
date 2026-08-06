@@ -1,0 +1,15 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      createNonConformalCouplesDict;
+}
+
+couples
+(
+    {
+        patch1 innerCylinder;
+        patch2 innerCylinder_slave;
+    }
+);

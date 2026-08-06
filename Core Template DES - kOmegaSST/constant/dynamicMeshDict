@@ -1,0 +1,45 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| OpenFOAM: The Open Source CFD Toolbox                                      |
+\*---------------------------------------------------------------------------*/
+
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      dynamicMeshDict;
+}
+
+#include "../Parameters/rotational_parameters.cpp"
+
+
+mover
+{
+    type          motionSolver;
+    libs ("librigidBodyMeshMotion.so");
+
+    motionSolver  motionSolverList;
+
+    motionSolverListCoeffs
+    {
+        solvers
+        {
+            rotor
+            {
+                motionSolver    solidBody;
+                cellZone        rotatingMesh;
+
+                solidBodyMotionFunction rotatingMotion;
+
+                rotatingMotionCoeffs
+                {
+                    origin  (0 0 0);
+                    axis    (0 0 1);
+                    omega   $omega_val;
+                }
+            }
+        }
+    }
+}
+

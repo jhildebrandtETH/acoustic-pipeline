@@ -1,0 +1,64 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2012                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      p;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -2 0 0 0 0];   // kg / (m·s²) = Pa
+
+// set initial static pressure, e.g. 1 atm
+internalField   uniform 101325;
+
+boundaryField
+{
+    #includeEtc "caseDicts/setConstraintTypes"
+
+    inlet
+    {
+        type            zeroGradient;
+    }
+
+    outlet
+    {
+        type            fixedValue;
+        value           uniform 101325;   // reference static pressure
+    }
+
+    walls
+    {
+        type            zeroGradient;
+    }
+
+    propellerTip
+    {
+        type            zeroGradient;
+    }
+
+    innerCylinder
+    {
+    type    fixedFluxPressure;
+    // If there are issues, revert back to: 
+    // type zeroGradient;
+    }
+
+    innerCylinder_slave
+    {
+    type    fixedFluxPressure;
+    // If there are issues, revert back to: 
+    // type zeroGradient;
+    }
+
+}
+
+// ************************************************************************* //

@@ -1,0 +1,177 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+#include "../Parameters/controlDict.cpp"
+
+application     pimpleFoam;
+
+startFrom       $startFrom;
+
+//startTime       $startTime;
+
+stopAt          endTime;
+
+endTime         $endTime;
+
+deltaT          $deltaT;
+
+maxDeltaT       $maxDeltaT;
+
+writeControl    timeStep;
+writeInterval   $writeInterval;
+
+////- For testing with moveDynamicMesh
+//deltaT          0.01;
+//writeControl    timeStep;
+//writeInterval   1;
+
+purgeWrite     $purgeWrite;
+
+writeFormat     ascii;
+
+writePrecision  6;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+adjustTimeStep  $adjustTimeStep;
+
+maxCo           $maxCo;
+
+maxDiCo         $maxDiCo;
+
+functions
+{
+    forcesBlades
+    {
+        type            forces;
+        libs            ("libforces.so");
+
+        patches         (propellerTip);    
+
+        // For incompressible simpleFoam:
+        rho             rhoInf;
+        rhoInf          1.225;      
+
+        CofR            (0 0 0);   
+        log             yes;
+    }
+
+    velocityProbe
+    {
+        type            probes;
+        libs            ("libsampling.so");
+        fields          (U);
+        probeLocations  ((0.128 0.01 0.01));  
+        writeControl    timeStep;
+        writeInterval   10;
+    }
+
+    yPlus
+    {
+        type            yPlus;
+        libs            ("libfieldFunctionObjects.so");
+        patches         (propellerTip);
+        log             yes;
+        writeControl    timeStep;
+        writeInterval   10;
+
+        // Enable to also view y+ distribution in paraFoam
+        // objects         ();
+    }
+
+    wallShear
+    {
+        type            wallShearStress;
+        libs            ("libfieldFunctionObjects.so");
+        patches         (propellerTip);
+        log             yes;
+        writeControl    timeStep;
+        writeInterval   10;
+
+    }
+
+    residuals
+    {
+        type            residuals;
+        libs            ("libutilityFunctionObjects.so");
+        writeControl    timeStep;
+        writeInterval   10;
+        fields
+        (
+            p
+            U
+            k
+            omega
+        );
+    }
+
+    vorticity
+    {
+        type            vorticity;
+        libs            ("libfieldFunctionObjects.so");
+        writeControl    writeTime;
+    }
+
+    Q
+    {
+        type            Q;
+        libs            ("libfieldFunctionObjects.so");
+        writeControl    writeTime;
+    }
+    /*
+    wakeLines
+    {
+        type            sets;
+        libs            ("libsampling.so");
+
+        writeControl    timeStep;
+        writeInterval   5;
+        setFormat       csv;
+
+        interpolationScheme cellPoint;
+
+        fields          (U vorticity);
+
+        sets
+        (
+            yMinus01
+            {
+                type    lineUniform;
+                axis    x;
+                start   (-0.30 -0.10 0);
+                end     ( 0.30 -0.10 0);
+                nPoints 100;   // dx = 0.025 over 0.6 m
+            }
+            yMinus02
+            {
+                type    lineUniform;
+                axis    x;
+                start   (-0.30 -0.20 0);
+                end     ( 0.30 -0.20 0);
+                nPoints 100;
+            }
+            yMinus03
+            {
+                type    lineUniform;
+                axis    x;
+                start   (-0.30 -0.30 0);
+                end     ( 0.30 -0.30 0);
+                nPoints 100;
+            }
+        );
+    } */
+}
+// ************************************************************************* //
