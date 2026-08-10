@@ -536,10 +536,7 @@ def processor_deletion_is_safe(
         if "dimensions" not in content:
             return False
 
-        if "internalField" not in content:
-            return False
-
-        if "boundaryField" not in content:
+        if "boundaryField" not in content and "internalField" not in content:
             return False
 
         return True
