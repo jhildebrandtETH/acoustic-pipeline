@@ -1,3 +1,4 @@
+import os
 import docker
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
@@ -178,6 +179,15 @@ def openfoamSimulation(
             },
         }
 
+        # On Linux, run the container with the host user's UID/GID so files
+        # created in bind-mounted case directories are owned by the user
+        # instead of root. On Windows, keep Docker's default user behavior.
+        docker_user = None
+        if hasattr(os, "getuid") and hasattr(os, "getgid"):
+            docker_user = f"{os.getuid()}:{os.getgid()}"
+
+        print(f"Docker user: {docker_user or 'default'}")
+
         container = client.containers.run(
             image="microfluidica/openfoam:13",
             name=simulation_name,
@@ -187,6 +197,7 @@ def openfoamSimulation(
             detach=True,
             tty=True,
             stdin_open=True,
+            user=docker_user,
         )
 
         print(f"Container '{container.name}' created successfully!")
