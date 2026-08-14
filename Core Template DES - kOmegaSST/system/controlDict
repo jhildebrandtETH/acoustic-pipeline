@@ -222,7 +222,7 @@ functions
             cubeWall
             {
                 type            patch;
-                patches         (cubeWall);
+                patches         (cubewall);
                 interpolate     false;
             }
         }

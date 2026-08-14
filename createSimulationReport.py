@@ -457,7 +457,7 @@ def create_simulation_report(case_path, rpm, mode, turbulence_model, output_pdf=
             y_margin = 0.15 * max(y_max - y_min, 1e-12)
 
         plt.figure(figsize=(12, 5))
-        plt.plot(times, thrusts, label="Pressure force Fy")
+        plt.plot(times, thrusts, label="Pressure force Fz")
 
         plt.axvspan(
             last_rev_start,
@@ -468,8 +468,8 @@ def create_simulation_report(case_path, rpm, mode, turbulence_model, output_pdf=
 
         plt.ylim(y_min - y_margin, y_max + y_margin)
         plt.xlabel("Time [s]")
-        plt.ylabel("Force Fy [N]")
-        plt.title("Pressure Force Fy")
+        plt.ylabel("Force Fz [N]")
+        plt.title("Pressure Force Fz")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -749,8 +749,8 @@ def create_simulation_report(case_path, rpm, mode, turbulence_model, output_pdf=
 
             try:
                 times.append(float(parts[0]))
-                thrusts.append(float(parts[2]) + float(parts[5]))
-                moments.append(float(parts[8]) + float(parts[11]))
+                thrusts.append(float(parts[3]) + float(parts[6]))
+                moments.append(float(parts[9]) + float(parts[12]))
             except (ValueError, IndexError):
                 continue
 
