@@ -217,5 +217,29 @@ functions
             omega
         );
     }
+
+    writePatchFields
+    {
+        type            surfaces;
+        libs            ("libsampling.so");
+ 
+        writeControl    timeStep;
+        writeInterval   1;
+        surfaceFormat   vtk;
+ 
+        fields          (p U);
+ 
+        interpolationScheme cellPoint;  //<- default
+ 
+        surfaces
+        {
+            cubeWall
+            {
+                type            patch;
+                patches         (cubewall);
+                interpolate     false;
+            }
+        }
+    }
 }
 // ************************************************************************* //
