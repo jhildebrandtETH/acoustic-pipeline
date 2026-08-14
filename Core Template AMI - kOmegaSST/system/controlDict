@@ -50,16 +50,30 @@ adjustTimeStep  $adjustTimeStep;
 
 maxCo           $maxCo;
 
-maxDiCo         $maxDiCo;
-
 functions
 {
+
+    startupDeltaTCap
+    {
+        type        fluidMaxDeltaT;
+
+        maxCo       5;
+
+        maxDeltaT table
+        (
+            (0         1.2e-8)
+            (2.4e-7    1.2e-8)
+            (1.2e-6    1e-5)
+        );
+    }
+
+
     forcesBlades
     {
         type            forces;
         libs            ("libforces.so");
 
-        patches         (cubeWall);    
+        patches         (cubewall);    
 
         // For incompressible simpleFoam:
         rho             rhoInf;
@@ -82,7 +96,7 @@ functions
     {
         type            yPlus;
         libs            ("libfieldFunctionObjects.so");
-        patches         (cubeWall);
+        patches         (cubewall);
         log             yes;
         writeControl    writeTime;
 
@@ -94,7 +108,7 @@ functions
     {
         type            wallShearStress;
         libs            ("libfieldFunctionObjects.so");
-        patches         (cubeWall);
+        patches         (cubewall);
         log             yes;
         writeControl    writeTime;
 

@@ -31,17 +31,17 @@ boundaryField
         value           uniform 1000;
 	}
 
-    rotorAMI
+    rotorami
     {
     type    zeroGradient;
     }
 
-    statorAMI
+    statorami
     {
     type    zeroGradient;
     }
 
-    cubeWall
+    cubewall
     {
         type            omegaWallFunction;
         value           uniform 1;

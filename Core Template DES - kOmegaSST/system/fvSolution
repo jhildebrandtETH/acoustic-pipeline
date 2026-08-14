@@ -16,6 +16,13 @@ FoamFile
 
 solvers
 {
+    MeshPhi
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-2;
+        relTol          0;
+    }
     "pcorr.*"
     {
         solver          GAMG;
@@ -59,9 +66,11 @@ solvers
 
 PIMPLE
 {
-    correctMeshPhi          no;
-    nOuterCorrectors    2;
-    nCorrectors         1;
+    correctPhi              yes;
+    correctMeshPhi          yes;
+
+    nOuterCorrectors        2;
+    nCorrectors             1;
     nNonOrthogonalCorrectors 0;
 }
 

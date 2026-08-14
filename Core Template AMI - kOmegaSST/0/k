@@ -30,18 +30,18 @@ boundaryField
         value           uniform 1e-10;
 	}
 
-    cubeWall
+    cubewall
     {
         type            fixedValue;
         value           uniform 1e-12;
     }
 
-    rotorAMI
+    rotorami
     {
     type    zeroGradient;
     }
 
-    statorAMI
+    statorami
     {
     type    zeroGradient;
     }

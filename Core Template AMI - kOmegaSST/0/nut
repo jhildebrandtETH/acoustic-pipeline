@@ -30,19 +30,19 @@ boundaryField
         value           uniform 0;
 	}
 
-    cubeWall
+    cubewall
     {
         type            nutLowReWallFunction;
         value           uniform 0;
     }
     
 
-    rotorAMI
+    rotorami
     {
     type    zeroGradient;
     }
 
-    statorAMI
+    statorami
     {
     type    zeroGradient;
     }

@@ -30,7 +30,7 @@ boundaryField
         value           uniform (0 0 0);
 	}
 
-    rotorAMI
+    rotorami
     {
         type            movingWallSlipVelocity;
         value           $internalField;
@@ -40,7 +40,7 @@ boundaryField
         // type noSlip;
     }
 
-    statorAMI
+    statorami
     {
         type            movingWallSlipVelocity;
         value           $internalField;
@@ -50,7 +50,7 @@ boundaryField
         // type noSlip;
     }
 
-    cubeWall
+    cubewall
     {
     type            movingWallVelocity;
     value           uniform (0 0 0);

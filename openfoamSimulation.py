@@ -215,14 +215,14 @@ def openfoamSimulation(
                     f"'{simulation_name}'. Expected '{case_separator}'."
                 )
 
-            mesh_file_string = f"{mesh_name}.unv"
+            mesh_file_string = f"{mesh_name}.msh"
 
             ideasUnv_cmd = (
-                "bash -c '"
+                'bash -c "'
                 "source /opt/openfoam13/etc/bashrc && "
-                f'ideasUnvToFoam -case /simulation '
+                'fluentMeshToFoam -case /simulation '
                 f'"/source_meshes/{mesh_file_string}"'
-                "'"
+                '"'
             )
 
             print("ideasUnvToFoam started...")
@@ -253,6 +253,7 @@ def openfoamSimulation(
 
             print("Mesh scaling finished...")
 
+            """
             set_wall_patch_cmd = (
             "bash -c '"
             "set -o pipefail; "
@@ -274,13 +275,31 @@ def openfoamSimulation(
                 return False
             print("Patch types configured.")
 
+            """
 
+            toposet_cmd = (
+             "bash -c 'source /opt/openfoam13/etc/bashrc && splitMeshRegions -makeCellZones -noFields | tee log.splitMeshRegions'"
+            )
+
+            print("TopoSet started...")
+            if not safe_exec(
+                container,
+                toposet_cmd,
+                "topoSet",
+                print_output=True,
+            ):
+                return False
+            print("toposet finished...")
+            
+
+
+            
             checkMesh_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && checkMesh -allGeometry -allTopology -writeSets -setFormat vtk | tee log.checkMesh'"
             print("checkMesh started...")
             if not safe_exec(container, checkMesh_cmd, "checkMesh", print_output=True):
                 return False
             print("checkMesh finished...")
-
+            
             
 
 
@@ -308,7 +327,7 @@ def openfoamSimulation(
             ):
                 return False
             print("Cell-set VTK conversion finished.")
-
+            
             checkMesh_log_path = Path(simulation_working_directory) / "log.checkMesh"
 
             if not (is_mesh_ok(checkMesh_log_path) or ALLOW_BAD_MESH):
@@ -318,13 +337,14 @@ def openfoamSimulation(
             if MODE == "AMI":
                 createNonConformalCouples_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "createNonConformalCouples -fields statorAMI rotorAMI"
+                    "createNonConformalCouples -fields statorami rotorami"
                     "> log.createNonConformalCouples'"
                 )
                 print("createNonConformalCouples started...")
                 if not safe_exec(container, createNonConformalCouples_cmd, "createNonConformalCouples"):
                     return False
                 print("createNonConformalCouples finished...")
+
 
             if initialize_from_previous:
                 print(f"Initializing from previous case: {previous_simulation_path}")

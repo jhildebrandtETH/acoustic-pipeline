@@ -44,7 +44,7 @@ surfaces
         cube
         {
             type            patch;
-            patches         ("cubeWall");
+            patches         ("cubewall");
             interpolate     true;
             invariant       true;  // Unaffected by mesh motion
             surfaceFormat   ensight;

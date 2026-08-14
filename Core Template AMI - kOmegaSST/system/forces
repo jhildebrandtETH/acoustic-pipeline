@@ -17,7 +17,7 @@ forces
 
     log           yes;
 
-    patches       ("cubeWall");
+    patches       ("cubewall");
     // rho           rhoInf;     // Indicates incompressible
     rho           rhoInf;     // Indicates incompressible
     rhoInf        1.225;          // Redundant for incompressible

@@ -29,17 +29,17 @@ boundaryField
         p0              uniform 0;
     }
 
-    cubeWall
+    cubewall
     {
         type            zeroGradient;
     }
 
-    rotorAMI
+    rotorami
     {
     type zeroGradient;
     }
 
-    statorAMI
+    statorami
     {
     type zeroGradient;
     }

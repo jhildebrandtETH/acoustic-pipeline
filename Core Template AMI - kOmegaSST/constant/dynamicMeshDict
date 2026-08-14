@@ -28,7 +28,7 @@ mover
             rotor
             {
                 motionSolver    solidBody;
-                cellZone        rotatingMesh;
+                cellZone        region0;
 
                 solidBodyMotionFunction rotatingMotion;
 

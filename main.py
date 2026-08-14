@@ -35,12 +35,12 @@ def find_source_meshes(source_meshes_directory: Path) -> dict[str, Path]:
     mesh_files = sorted(
         path
         for path in source_meshes_directory.iterdir()
-        if path.is_file() and path.suffix.lower() == ".unv"
+        if path.is_file() and path.suffix.lower() == ".msh"
     )
 
     if not mesh_files:
         raise FileNotFoundError(
-            f"No .unv mesh files were found in: "
+            f"No .msh mesh files were found in: "
             f"{source_meshes_directory}"
         )
 

@@ -25,17 +25,17 @@ boundaryField
         type            calculated;
         value           uniform 0;
     }
-    statorAMI
+    statorami
     {
         type            calculated;
         value           uniform 0;
     }
-    rotorAMI
+    rotorami
     {
         type            calculated;
         value           uniform 0;
     }
-    cubeWall
+    cubewall
     {
         type            calculated;
         value           uniform 0;
