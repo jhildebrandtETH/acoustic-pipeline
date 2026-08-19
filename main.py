@@ -10,54 +10,7 @@ from tools import update_case_status
 from tools import has_timestep
 from tools import reset_case_folder
 from tools import get_safe_timestep
-
-
-def find_source_meshes(source_meshes_directory: Path) -> dict[str, Path]:
-    """
-    Find all .unv meshes inside source_meshes.
-
-    Example:
-        source_meshes/mesh_a.unv -> mesh name: mesh_a
-        source_meshes/mesh_b.unv -> mesh name: mesh_b
-
-    Returns
-    -------
-    dict[str, Path]
-        Mapping from mesh name to its complete source path.
-    """
-
-    if not source_meshes_directory.is_dir():
-        raise FileNotFoundError(
-            f"Source mesh directory does not exist: "
-            f"{source_meshes_directory}"
-        )
-
-    mesh_files = sorted(
-        path
-        for path in source_meshes_directory.iterdir()
-        if path.is_file() and path.suffix.lower() == ".msh"
-    )
-
-    if not mesh_files:
-        raise FileNotFoundError(
-            f"No .msh mesh files were found in: "
-            f"{source_meshes_directory}"
-        )
-
-    source_meshes = {}
-
-    for mesh_path in mesh_files:
-        mesh_name = mesh_path.stem
-
-        if mesh_name in source_meshes:
-            raise ValueError(
-                f"Multiple source meshes use the name '{mesh_name}' in "
-                f"{source_meshes_directory}"
-            )
-
-        source_meshes[mesh_name] = mesh_path
-
-    return source_meshes
+from tools import find_source_stls
 
 
 def main() -> None:
@@ -113,14 +66,18 @@ def main() -> None:
         default="convergence",
     )
 
+    parser.add_argument("--acoustic-surface", choices=["permeable","impermeable"], help=("impermeable: propeller surface for propagation | permeable: sphere with varying radius"))
+
+    parser.add_argument("--acoustic-sphere-diameter", default=None, type=float)
+
     args = parser.parse_args()
 
     simulations_directory = args.sim_dir.resolve()
-    source_meshes_directory = simulations_directory / "source_meshes"
+    source_meshes_directory = simulations_directory / "STL"
 
     # All available source meshes are determined from the source_meshes folder.
     try:
-        source_meshes = find_source_meshes(source_meshes_directory)
+        source_meshes = find_source_stls(source_meshes_directory)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
 
@@ -225,10 +182,13 @@ def main() -> None:
 
             if len(args.meshes) != 1 or len(args.rpms) != 1:
                 parser.error(
-                    "When --study is set, source_meshes must contain "
+                    "When --study is set, STL must contain "
                     "exactly one mesh and exactly one RPM must be provided."
                 )
-
+            if args.acoustic_surface == "impermeable" and args.acoustic_sphere_diameter is not None:
+                parser.error("Impermable acoustic solver mode has been selected but a sphere diameter factor was given. Check given conditions.")
+            if args.acoustic_surface == "permeable" and args.acoustic_sphere_diameter is None:
+                args.acoustic_sphere_diameter = 2.5
         simulations_directory.mkdir(
             parents=True,
             exist_ok=True,
@@ -323,6 +283,7 @@ def main() -> None:
                 print("Starting preprocessing...")
 
                 preprocessing_kwargs = dict(
+                    SIMULATION_NAME = folder_name,
                     RPM_COUNT=rpm,
                     MAIN_DIRECTORY=pipeline_main_directory,
                     TARGET_DIRECTORY=simulation_path,
@@ -331,6 +292,8 @@ def main() -> None:
                     INIT_FROM_PREVIOUS=use_previous_init,
                     PREVIOUS_SIMULATION_PATH=previous_simulation_path,
                     TURBULENCE_MODEL=args.turbulence,
+                    ACOUSTIC_SURFACE = args.acoustic_surface,
+                    ACOUSTIC_SPHERE_DIAMETER = args.acoustic_sphere_diameter,
                 )
 
                 if is_study_case:

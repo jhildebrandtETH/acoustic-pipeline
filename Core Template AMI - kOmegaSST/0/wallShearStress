@@ -20,26 +20,51 @@ internalField   uniform (0 0 0);
 
 boundaryField
 {
-    farfield
+    walls
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    
-    rotorami
+    inlet
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    statorami
+    outlet
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    cubewall
+    rotaryRegion
     {
         type            calculated;
         value           uniform (0 0 0);
+    }
+    rotaryRegion_slave
+    {
+        type            calculated;
+        value           uniform (0 0 0);
+    }
+    propeller
+    {
+        type            calculated;
+        value           uniform (0 0 0);
+    }
+    nonConformalCyclic_on_rotaryRegion
+    {
+        type            nonConformalCyclic;
+    }
+    nonConformalCyclic_on_rotaryRegion_slave
+    {
+        type            nonConformalCyclic;
+    }
+    nonConformalError_on_rotaryRegion
+    {
+        type            nonConformalError;
+    }
+    nonConformalError_on_rotaryRegion_slave
+    {
+        type            nonConformalError;
     }
 }
 

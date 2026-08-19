@@ -3,9 +3,176 @@ import time
 import numpy as np
 import pandas as pd
 import re
+import threading
 from pathlib import Path
 import json
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
+
+def _numeric_time_directories(directory, maximum_time=None):
+    """Return numeric OpenFOAM time-directory names up to maximum_time."""
+    directory = Path(directory)
+
+    if not directory.is_dir():
+        return set()
+
+    upper_limit = (
+        Decimal(str(maximum_time)) if maximum_time is not None else None
+    )
+    time_names = set()
+
+    for path in directory.iterdir():
+        if not path.is_dir():
+            continue
+
+        try:
+            time_value = Decimal(path.name)
+        except InvalidOperation:
+            continue
+
+        # Preserve the original 0/ initial-condition directory.
+        if time_value <= 0:
+            continue
+
+        if upper_limit is None or time_value <= upper_limit:
+            time_names.add(path.name)
+
+    return time_names
+
+
+def reconstructed_history_is_complete(simulation_directory, safe_time):
+    """Check that every processor0 time up to safe_time exists reconstructed."""
+    simulation_directory = Path(simulation_directory)
+    processor0_directory = simulation_directory / "processor0"
+
+    expected_times = _numeric_time_directories(
+        processor0_directory, maximum_time=safe_time
+    )
+    reconstructed_times = _numeric_time_directories(
+        simulation_directory, maximum_time=safe_time
+    )
+
+    if not expected_times:
+        print(
+            f"No decomposed time directories up to {safe_time} were found in "
+            f"'{processor0_directory}'."
+        )
+        return False
+
+    missing_times = expected_times - reconstructed_times
+
+    if missing_times:
+        missing_times = sorted(missing_times, key=Decimal)
+        print(
+            "Resume reconstruction is incomplete. The following time "
+            f"directories are still missing in the case root: {missing_times}"
+        )
+        return False
+
+    print(
+        f"Verified {len(expected_times)} reconstructed time directories "
+        f"through safe time {safe_time}."
+    )
+    return True
+
+
+
+def _run_reconstruction_with_progress(
+    container,
+    command,
+    description,
+    simulation_directory,
+    maximum_time=None,
+):
+    """
+    Run reconstructPar while displaying one-line filesystem progress.
+    """
+
+    reconstruction_stop_event = threading.Event()
+
+    reconstruction_thread = threading.Thread(
+        target=run_reconstruction_progress_monitor,
+        kwargs={
+            "main_sim_folder": simulation_directory,
+            "maximum_time": maximum_time,
+            "check_interval": 2,
+            "stop_event": reconstruction_stop_event,
+        },
+        name="reconstruct-par-progress-monitor",
+        daemon=True,
+    )
+
+    reconstruction_thread.start()
+
+    reconstruction_successful = False
+
+    try:
+        reconstruction_successful = safe_exec(
+            container,
+            command,
+            description,
+        )
+
+    finally:
+        reconstruction_stop_event.set()
+
+        if reconstruction_thread.is_alive():
+            reconstruction_thread.join(timeout=10)
+
+        if reconstruction_thread.is_alive():
+            print(
+                "WARNING: Reconstruction progress monitor did not "
+                "stop within timeout."
+            )
+
+    return reconstruction_successful
+
+
+def find_source_stls(source_meshes_directory: Path) -> dict[str, Path]:
+    """
+    Find all .stl files inside "STL".
+
+    Example:
+        STL/11x7E.stl -> geometry name: 11x7E
+
+    Returns
+    -------
+    dict[str, Path]
+        Mapping from STL name to its complete source path.
+    """
+
+    if not source_meshes_directory.is_dir():
+        raise FileNotFoundError(
+            f"Source STL directory does not exist: "
+            f"{source_meshes_directory}"
+        )
+
+    stl_files = sorted(
+        path
+        for path in source_meshes_directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".stl"
+    )
+
+    if not stl_files:
+        raise FileNotFoundError(
+            f"No .stl geometries files were found in: "
+            f"{source_meshes_directory}"
+        )
+
+    source_meshes = {}
+
+    for mesh_path in stl_files:
+        mesh_name = mesh_path.stem
+
+        if mesh_name in source_meshes:
+            raise ValueError(
+                f"Multiple source meshes use the name '{mesh_name}' in "
+                f"{source_meshes_directory}"
+            )
+
+        source_meshes[mesh_name] = mesh_path
+
+    return source_meshes
 
 def get_y_domain_height(blockmeshdict_path):
 
@@ -705,6 +872,8 @@ def create_simulation_order(args, simulations_directory: Path):
         )
 
     batch = {
+        "acoustic_surface" : args.acoustic_surface,
+        "acoustic_sphere_diameter" : args.acoustic_sphere_diameter,
         "mode": args.mode,
         "turbulence" : args.turbulence,
         "meshes": args.meshes,
@@ -742,6 +911,8 @@ def create_simulation_order(args, simulations_directory: Path):
                 "mesh": mesh,
                 "rpm": rpm,
                 "mode": args.mode,
+                "acoustic_surface" : args.acoustic_surface,
+                "acoustic_sphere_diameter" : args.acoustic_sphere_diameter,
                 "turbulence" : args.turbulence,
                 "cores": args.cores,
                 "mesh_only" : args.mesh_only,
@@ -770,6 +941,8 @@ def create_simulation_order(args, simulations_directory: Path):
                     "cores": args.cores,
                     "mesh_only" : args.mesh_only,
                     "end_on" : args.end_on,
+                    "acoustic_surface" : args.acoustic_surface,
+                    "acoustic_sphere_diameter" : args.acoustic_sphere_diameter,
                     "allow_bad_mesh" : args.allow_bad_mesh,
                     "field_init": args.field_init,
                     "study": args.study,

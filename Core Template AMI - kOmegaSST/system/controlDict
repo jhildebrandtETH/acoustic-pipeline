@@ -73,7 +73,7 @@ functions
         type            forces;
         libs            ("libforces.so");
 
-        patches         (cubewall);    
+        patches         (propeller);    
 
         // For incompressible simpleFoam:
         rho             rhoInf;
@@ -96,7 +96,7 @@ functions
     {
         type            yPlus;
         libs            ("libfieldFunctionObjects.so");
-        patches         (cubewall);
+        patches         (propeller);
         log             yes;
         writeControl    writeTime;
 
@@ -108,7 +108,7 @@ functions
     {
         type            wallShearStress;
         libs            ("libfieldFunctionObjects.so");
-        patches         (cubewall);
+        patches         (propeller);
         log             yes;
         writeControl    writeTime;
 
@@ -221,6 +221,7 @@ functions
     writePatchFields
     {
         type            surfaces;
+        enabled         $impermeableEnabled;
         libs            ("libsampling.so");
  
         writeControl    timeStep;
@@ -236,7 +237,33 @@ functions
             cubeWall
             {
                 type            patch;
-                patches         (cubewall);
+                patches         (propeller);
+                interpolate     false;
+            }
+        }
+    }
+
+    writePermeableSurfaceFields
+    {
+        type            surfaces;
+        enabled         $permeableEnabled;
+        libs            ("libsampling.so");
+       
+        writeControl    timeStep;
+        writeInterval   1;
+        surfaceFormat   vtk;
+ 
+        fields          (p U);
+ 
+        interpolationScheme cellPoint;
+ 
+        surfaces
+        {
+            permeableSurface
+            {
+                type            triSurfaceMesh;
+                surface         permeableSurface.stl;
+                source          cells;
                 interpolate     false;
             }
         }

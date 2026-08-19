@@ -2,8 +2,9 @@
 
 import shutil
 import os
-import re
 import math
+import numpy as np
+import trimesh
 from pathlib import Path
 from tools import get_latest_timestep
 from tools import update_parameter
@@ -19,7 +20,7 @@ interpolation_points = 100
 # Usage
 
 
-def preprocessing(RPM_COUNT, MAIN_DIRECTORY, TARGET_DIRECTORY, CORES_TO_USE, MODE, INIT_FROM_PREVIOUS, PREVIOUS_SIMULATION_PATH, TURBULENCE_MODEL, STUDY_PARAMETER_NAME = None, STUDY_PARAMETER_FILE = None, STUDY_PARAMETER = None):
+def preprocessing(SIMULATION_NAME, RPM_COUNT, MAIN_DIRECTORY, TARGET_DIRECTORY, CORES_TO_USE, MODE, INIT_FROM_PREVIOUS, PREVIOUS_SIMULATION_PATH, TURBULENCE_MODEL, ACOUSTIC_SURFACE, ACOUSTIC_SPHERE_DIAMETER, STUDY_PARAMETER_NAME = None, STUDY_PARAMETER_FILE = None, STUDY_PARAMETER = None):
 
  
     #1. duplicate right Core Template to target directory (AMI or RMF approach)
@@ -166,7 +167,97 @@ def preprocessing(RPM_COUNT, MAIN_DIRECTORY, TARGET_DIRECTORY, CORES_TO_USE, MOD
     update_parameter(snappyHexMeshDict_parameters_file_path, 'propellerTipSurfaceRefinementLevel', propeller_surface_refinement_level_string)
     
     """
+    # Acoustic calculations setup
 
-    
+    controlDict_parameters_file_path = os.path.join(TARGET_DIRECTORY, 'Parameters', 'controlDict.cpp')
+
+    if ACOUSTIC_SURFACE == "permeable":
+        update_parameter(controlDict_parameters_file_path, 'impermeableEnabled', 'no')
+        update_parameter(controlDict_parameters_file_path, 'permeableEnabled', 'yes')
+    elif ACOUSTIC_SURFACE == "impermeable":
+        update_parameter(controlDict_parameters_file_path, 'impermeableEnabled', 'yes')
+        update_parameter(controlDict_parameters_file_path, 'permeableEnabled', 'no')
+
+
+    triSurface_path = TARGET_DIRECTORY / "constant" / "triSurface"
+
+    triSurface_path.mkdir(parents = True, exist_ok = True)
+
+    diameter_inch = float(SIMULATION_NAME.split("x", 1)[0])
+    diameter_meter = diameter_inch * 0.0254
+
+    acoustic_sphere_diameter = 0.5*ACOUSTIC_SPHERE_DIAMETER * diameter_meter
+
+    sphere = trimesh.creation.icosphere(
+        subdivisions= 6,
+        radius=acoustic_sphere_diameter,
+    )
+    sphere.export(triSurface_path / "permeableSurface.stl")
+
+
+    rotation = trimesh.transformations.rotation_matrix(
+    np.pi / 2,
+    [1, 0, 0]
+    )
+
+
+
+    rotaryCylinder = trimesh.creation.cylinder(
+        radius= 0.5*diameter_meter*1.2,
+        height=0.05,
+        sections=128,
+    )
+    rotaryCylinder.apply_transform(rotation)
+    rotaryCylinder.export(triSurface_path / "rotaryCylinder.stl")
+
+    innerCylinder = trimesh.creation.cylinder(
+        radius= 0.2,
+        height=0.5,
+        sections=128,
+    )
+
+    wake_offset = -0.1
+
+    innerCylinder.apply_transform(rotation)
+    innerCylinder.apply_translation([0.0, wake_offset, 0.0])
+    innerCylinder.export(triSurface_path / "innerCylinder.stl")
+
+    outerCylinder = trimesh.creation.cylinder(
+        radius= 0.25,
+        height=0.6,
+        sections=128,
+    )
+    outerCylinder.apply_transform(rotation)
+    outerCylinder.apply_translation([0.0, wake_offset, 0.0])
+    outerCylinder.export(triSurface_path / "outerCylinder.stl")
+
+
+
+    stl_name = SIMULATION_NAME.rsplit("_", 2)[0]
+
+    # Copy propeller STL
+    stl_path = TARGET_DIRECTORY.parent / "STL" / f"{stl_name}.stl"
+    target_stl_path = triSurface_path / "propeller.stl"
+
+    shutil.copy(stl_path, target_stl_path)
+
+
+    # Copy propeller feature edges
+    features_path = TARGET_DIRECTORY.parent / "FEATURES"
+
+    feature_files = {
+        "other": features_path / f"{stl_name}_other.obj",
+        "tip": features_path / f"{stl_name}_tip.obj",
+    }
+
+    for feature_name, feature_path in feature_files.items():
+
+        if not feature_path.is_file():
+            raise FileNotFoundError(
+                f"Feature file not found: {feature_path}"
+            )
+
+        target_feature_path = triSurface_path / f"propeller_{feature_name}.obj"
+        shutil.copy(feature_path, target_feature_path)
 
     return None

@@ -17,31 +17,46 @@ FoamFile
 
 dimensions      [0 2 -2 0 0 0 0];   // kg / (m·s²) = Pa
 
-internalField   uniform 0;
+// set initial static pressure, e.g. 1 atm
+internalField   uniform 101325;
 
 boundaryField
 {
     #includeEtc "caseDicts/setConstraintTypes"
 
-    farfield
-    {
-        type            totalPressure;
-        p0              uniform 0;
-    }
-
-    cubewall
+    inlet
     {
         type            zeroGradient;
     }
 
-    rotorami
+    outlet
     {
-    type zeroGradient;
+        type            fixedValue;
+        value           uniform 101325;   // reference static pressure
     }
 
-    statorami
+    walls
     {
-    type zeroGradient;
+        type            zeroGradient;
+    }
+
+    propeller
+    {
+        type            zeroGradient;
+    }
+
+    rotaryRegion
+    {
+    type    fixedFluxPressure;
+    // If there are issues, revert back to: 
+    // type zeroGradient;
+    }
+
+    rotaryRegion_slave
+    {
+    type    fixedFluxPressure;
+    // If there are issues, revert back to: 
+    // type zeroGradient;
     }
 
 }

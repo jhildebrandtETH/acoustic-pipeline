@@ -1,7 +1,7 @@
 import os
 import docker
 from pathlib import Path
-from decimal import Decimal, InvalidOperation
+
 import threading
 
 from tools import run_convergence_monitor
@@ -12,131 +12,12 @@ from tools import is_mesh_ok
 from tools import get_safe_timestep
 from tools import processor_deletion_is_safe
 from tools import safe_exec
+from tools import _numeric_time_directories
+from tools import reconstructed_history_is_complete
+from tools import _run_reconstruction_with_progress
 
 
 convergence_check_interval = 1
-reconstruction_check_interval = 2
-
-
-def _numeric_time_directories(directory, maximum_time=None):
-    """Return numeric OpenFOAM time-directory names up to maximum_time."""
-    directory = Path(directory)
-
-    if not directory.is_dir():
-        return set()
-
-    upper_limit = (
-        Decimal(str(maximum_time)) if maximum_time is not None else None
-    )
-    time_names = set()
-
-    for path in directory.iterdir():
-        if not path.is_dir():
-            continue
-
-        try:
-            time_value = Decimal(path.name)
-        except InvalidOperation:
-            continue
-
-        # Preserve the original 0/ initial-condition directory.
-        if time_value <= 0:
-            continue
-
-        if upper_limit is None or time_value <= upper_limit:
-            time_names.add(path.name)
-
-    return time_names
-
-
-def reconstructed_history_is_complete(simulation_directory, safe_time):
-    """Check that every processor0 time up to safe_time exists reconstructed."""
-    simulation_directory = Path(simulation_directory)
-    processor0_directory = simulation_directory / "processor0"
-
-    expected_times = _numeric_time_directories(
-        processor0_directory, maximum_time=safe_time
-    )
-    reconstructed_times = _numeric_time_directories(
-        simulation_directory, maximum_time=safe_time
-    )
-
-    if not expected_times:
-        print(
-            f"No decomposed time directories up to {safe_time} were found in "
-            f"'{processor0_directory}'."
-        )
-        return False
-
-    missing_times = expected_times - reconstructed_times
-
-    if missing_times:
-        missing_times = sorted(missing_times, key=Decimal)
-        print(
-            "Resume reconstruction is incomplete. The following time "
-            f"directories are still missing in the case root: {missing_times}"
-        )
-        return False
-
-    print(
-        f"Verified {len(expected_times)} reconstructed time directories "
-        f"through safe time {safe_time}."
-    )
-    return True
-
-
-
-def _run_reconstruction_with_progress(
-    container,
-    command,
-    description,
-    simulation_directory,
-    maximum_time=None,
-):
-    """
-    Run reconstructPar while displaying one-line filesystem progress.
-    """
-
-    reconstruction_stop_event = threading.Event()
-
-    reconstruction_thread = threading.Thread(
-        target=run_reconstruction_progress_monitor,
-        kwargs={
-            "main_sim_folder": simulation_directory,
-            "maximum_time": maximum_time,
-            "check_interval": reconstruction_check_interval,
-            "stop_event": reconstruction_stop_event,
-        },
-        name="reconstruct-par-progress-monitor",
-        daemon=True,
-    )
-
-    reconstruction_thread.start()
-
-    reconstruction_successful = False
-
-    try:
-        reconstruction_successful = safe_exec(
-            container,
-            command,
-            description,
-        )
-
-    finally:
-        reconstruction_stop_event.set()
-
-        if reconstruction_thread.is_alive():
-            reconstruction_thread.join(timeout=10)
-
-        if reconstruction_thread.is_alive():
-            print(
-                "WARNING: Reconstruction progress monitor did not "
-                "stop within timeout."
-            )
-
-    return reconstruction_successful
-
-
 
 def openfoamSimulation(
     simulation_name,
@@ -164,18 +45,11 @@ def openfoamSimulation(
 
         simulation_working_directory = Path(simulation_working_directory)
 
-        source_meshes_directory = (
-            simulation_working_directory.parent / "source_meshes"
-        )
 
         my_volumes = {
             str(simulation_working_directory): {
                 "bind": "/simulation",
                 "mode": "rw",
-            },
-            str(source_meshes_directory): {
-                "bind": "/source_meshes",
-                "mode": "ro",
             },
         }
 
@@ -217,6 +91,41 @@ def openfoamSimulation(
 
             mesh_file_string = f"{mesh_name}.msh"
 
+            blockMesh_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && blockMesh > log.blockMesh'"
+            print("blockMesh started...")
+            if not safe_exec(container, blockMesh_cmd, "blockMesh"):
+                return False
+            print("blockMesh finished...")
+
+
+            surfaceFeatures_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && surfaceFeatures > log.surfaceFeatures'"
+            print("surfaceFeatures started...")
+            if not safe_exec(container, surfaceFeatures_cmd, "surfaceFeatures"):
+                return False
+            print("surfaceFeatures finished...")
+
+            decomposePar_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && decomposePar -copyZero > log.decomposePar'"
+            print("decomposePar started...")
+            if not safe_exec(container, decomposePar_cmd, "decomposePar"):
+                return False
+            print("decomposePar finished...")
+
+            snappyHexMesh_cmd = (
+                "bash -c '"
+                "set -o pipefail; "
+                "source /opt/openfoam13/etc/bashrc && "
+                f"mpirun --allow-run-as-root --use-hwthread-cpus "
+                f"-np {NUMBER_OF_CORES} "
+                "snappyHexMesh -parallel -overwrite "
+                "2>&1 | tee log.snappyHexMesh"
+                "'"
+            )
+            print("snappyHexMesh started...")
+            if not safe_exec(container, snappyHexMesh_cmd, "snappyHexMesh"):
+                return False
+            print("snappyHexMesh finished...")
+
+            """
             ideasUnv_cmd = (
                 'bash -c "'
                 "source /opt/openfoam13/etc/bashrc && "
@@ -224,7 +133,7 @@ def openfoamSimulation(
                 f'"/source_meshes/{mesh_file_string}"'
                 '"'
             )
-
+            
             print("ideasUnvToFoam started...")
             if not safe_exec(
                 container,
@@ -253,7 +162,7 @@ def openfoamSimulation(
 
             print("Mesh scaling finished...")
 
-            """
+            
             set_wall_patch_cmd = (
             "bash -c '"
             "set -o pipefail; "
@@ -275,7 +184,7 @@ def openfoamSimulation(
                 return False
             print("Patch types configured.")
 
-            """
+            
 
             toposet_cmd = (
              "bash -c 'source /opt/openfoam13/etc/bashrc && splitMeshRegions -makeCellZones -noFields | tee log.splitMeshRegions'"
@@ -290,7 +199,7 @@ def openfoamSimulation(
             ):
                 return False
             print("toposet finished...")
-            
+            """
 
 
             
@@ -359,16 +268,8 @@ def openfoamSimulation(
                     return False
                 print("mapFields finished...")
 
-            if not MESH_ONLY:
-                
-                decomposePar_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && decomposePar > log.decomposePar'"
-                print("decomposePar started...")
-                if not safe_exec(container, decomposePar_cmd, "decomposePar"):
-                    return False
-                print("decomposePar finished...")
-                
-
-        # ---------------- RESUME ----------------
+            #if not MESH_ONLY:
+            # ---------------- RESUME ----------------
         else:
             print("Preparing to resume...")
 
@@ -551,12 +452,6 @@ def openfoamSimulation(
                 "2>&1 | stdbuf -oL tee log.pimpleFoam"
                 "'"
             )
-            """
-            simRun_cmd = (
-                            f"bash -c 'source /opt/openfoam13/etc/bashrc && "
-                            f"foamRun -solver incompressibleFluid 2>&1 | tee log.pimpleFoam'"
-                        )
-            """
 
             print("pimpleFoam solver started.")
 
@@ -602,6 +497,23 @@ def openfoamSimulation(
 
         else:
             print("Mesh-only mode: skipping solver.")
+            
+            reconstructPar_cmd = (
+                            "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                            "reconstructPar > log.reconstructPar 2>&1'"
+                        )
+            print("Reconstructing mesh started...")
+            if not safe_exec(container, reconstructPar_cmd, "reconstructPar"):
+                return False
+            print("Reconstructing mesh finished...")
+
+            checkMesh_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && checkMesh -allGeometry -allTopology -writeSets -setFormat vtk | tee log.checkMesh'"
+            print("checkMesh after reconstructing started...")
+            if not safe_exec(container, checkMesh_cmd, "checkMesh", print_output=True):
+                return False
+            print("checkMesh after reconstructing finished...")
+                        
+
 
         # ---------------- FOAM FILE ----------------
         foam_file_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && touch sim.foam'"

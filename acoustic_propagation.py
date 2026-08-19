@@ -26,7 +26,7 @@ def run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM):
     create_reference_geometry_vtk_series(
         surface_directory,
         acoustic_surface_directory,
-        surface_file="cubeWall.vtk",
+        surface_file="propeller.vtk",
     )
 
 
@@ -41,7 +41,7 @@ def run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM):
 
     solver = F1ASolver.from_openfoam_vtk(
         acoustic_surface_directory,
-        surface_file="cubeWall.vtk",
+        surface_file="propeller.vtk",
         rpm=rpm,
         permeable=False,
         moving_surface=True,
@@ -62,8 +62,8 @@ def run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM):
 
     plot_spl_spectrum(
         result,
-        rotations=1.0,
-        blade_count=1,
+        rotations=5.0,
+        blade_count=2,
     )
 
     output_path = SIMULATION_WORKING_DIRECTORY / "report" / "spl_spectrum.png"
@@ -71,8 +71,8 @@ def run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM):
 
     ax = plot_spl_spectrum(
         result,
-        rotations=1.0,
-        blade_count=1,
+        rotations=5.0,
+        blade_count=2,
     )
 
     # Usually the plotting helper returns a Matplotlib Axes object

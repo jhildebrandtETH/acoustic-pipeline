@@ -12,6 +12,7 @@ dependencies:
 
       # Direct dependencies of the main pipeline.
       - docker==7.1.0
+      - trimesh==4.12.2
       - pandas>=2.2,<3
       - reportlab>=4.1,<5
 
