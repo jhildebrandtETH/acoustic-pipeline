@@ -749,8 +749,8 @@ def create_simulation_report(case_path, rpm, mode, turbulence_model, output_pdf=
 
             try:
                 times.append(float(parts[0]))
-                thrusts.append(float(parts[3]) + float(parts[6]))
-                moments.append(float(parts[9]) + float(parts[12]))
+                thrusts.append(float(parts[2]) + float(parts[5]))
+                moments.append(float(parts[8]) + float(parts[11]))
             except (ValueError, IndexError):
                 continue
 

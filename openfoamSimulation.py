@@ -244,16 +244,25 @@ def openfoamSimulation(
                 return False
 
             if MODE == "AMI":
+
+
                 createNonConformalCouples_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "createNonConformalCouples -fields statorami rotorami"
-                    "> log.createNonConformalCouples'"
+                    f"mpirun --oversubscribe -np {NUMBER_OF_CORES} "
+                    "createNonConformalCouples -parallel rotaryRegion_slave rotaryRegion"
+                    "> log.createNonConformalCouples 2>&1'"
                 )
-                print("createNonConformalCouples started...")
-                if not safe_exec(container, createNonConformalCouples_cmd, "createNonConformalCouples"):
-                    return False
-                print("createNonConformalCouples finished...")
 
+                print("createNonConformalCouples started...")
+
+                if not safe_exec(
+                    container,
+                    createNonConformalCouples_cmd,
+                    "createNonConformalCouples"
+                ):
+                    return False
+
+                print("createNonConformalCouples finished...")
 
             if initialize_from_previous:
                 print(f"Initializing from previous case: {previous_simulation_path}")
