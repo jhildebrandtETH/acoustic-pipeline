@@ -7,21 +7,37 @@ from acousticSolver.src.foamacoustics.plotting import plot_spl_spectrum
 from tools import create_reference_geometry_vtk_series
 
 
-def run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM):
+def run_acoustic_solver(ACOUSTIC_SURFACE, SIMULATION_WORKING_DIRECTORY, RPM):
 
     print("Acoustic solver started...")
 
-    surface_directory = (
-        SIMULATION_WORKING_DIRECTORY
-        / "postProcessing"
-        / "writePatchFields"
-    )
+    if ACOUSTIC_SURFACE == "impermeable":
 
-    acoustic_surface_directory = (
-        SIMULATION_WORKING_DIRECTORY
-        / "postProcessing"
-        / "writePatchFields_referenceGeometry"
-    )
+        surface_directory = (
+            SIMULATION_WORKING_DIRECTORY
+            / "postProcessing"
+            / "writePatchFields"
+        )
+
+        acoustic_surface_directory = (
+            SIMULATION_WORKING_DIRECTORY
+            / "postProcessing"
+            / "writePatchFields_referenceGeometry"
+        )
+    else:
+
+        surface_directory = (
+            SIMULATION_WORKING_DIRECTORY
+            / "postProcessing"
+            / "writePermeableSurfaceFields"
+        )
+        
+        acoustic_surface_directory = (
+            SIMULATION_WORKING_DIRECTORY
+            / "postProcessing"
+            / "writePermeableSurfaceFields_referenceGeometry"
+        )
+
 
     create_reference_geometry_vtk_series(
         surface_directory,
@@ -37,21 +53,39 @@ def run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM):
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
-    solver_path = SIMULATION_WORKING_DIRECTORY / "postProcessing" / "writePatchFields"
+    if ACOUSTIC_SURFACE == "impermeable":
 
-    solver = F1ASolver.from_openfoam_vtk(
-        acoustic_surface_directory,
-        surface_file="propeller.vtk",
-        rpm=rpm,
-        permeable=False,
-        moving_surface=True,
-        rotation_center_m=[0.0, 0.0, 0.0],
-        omega_rad_s=[0.0, 0.0, omega_rad_s],
-        device=device,
-        cache_dir=SIMULATION_WORKING_DIRECTORY
-        / ".cache"
-        / "writePatchFields_referenceGeometry",
-    )
+        solver = F1ASolver.from_openfoam_vtk(
+                acoustic_surface_directory,
+                surface_file="propeller.vtk",
+                rpm=rpm,
+                permeable=False,
+                moving_surface=True,
+                rotation_center_m=[0.0, 0.0, 0.0],
+                omega_rad_s=[0.0, omega_rad_s, 0.0],
+                device=device,
+                cache_dir=SIMULATION_WORKING_DIRECTORY
+                / ".cache"
+                / "writePatchFields_referenceGeometry",
+            )
+        
+    else:
+
+        solver = F1ASolver.from_openfoam_vtk(
+                acoustic_surface_directory,
+                surface_file="propeller.vtk",
+                rpm=rpm,
+                permeable=True,
+                moving_surface=True,
+                rotation_center_m=[0.0, 0.0, 0.0],
+                omega_rad_s=[0.0, omega_rad_s, 0.0],
+                device=device,
+                cache_dir=SIMULATION_WORKING_DIRECTORY
+                / ".cache"
+                / "writePermeableSurfaceFields_referenceGeometry",
+            )
+
+    
 
     observer_m = torch.tensor(
         [1.0, 0.0, 0.0],

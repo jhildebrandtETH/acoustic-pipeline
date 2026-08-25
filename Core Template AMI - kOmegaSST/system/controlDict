@@ -234,7 +234,7 @@ functions
  
         surfaces
         {
-            cubeWall
+            propeller
             {
                 type            patch;
                 patches         (propeller);

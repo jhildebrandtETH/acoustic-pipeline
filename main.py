@@ -471,6 +471,7 @@ def main() -> None:
                 print("Starting postprocessing...")
 
                 postprocessing(
+                    ACOUSTIC_SURFACE=args.acoustic_surface,
                     SIMULATION_WORKING_DIRECTORY=simulation_path,
                     RPM_COUNT=rpm,
                     MODE=mode,

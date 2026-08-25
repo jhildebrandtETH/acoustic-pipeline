@@ -4,9 +4,9 @@ from tools import merge_postprocessing_dat_files
 
 
 
-def postprocessing(SIMULATION_WORKING_DIRECTORY, RPM_COUNT, MODE, TURBULENCE_MODEL):
+def postprocessing(ACOUSTIC_SURFACE, SIMULATION_WORKING_DIRECTORY, RPM_COUNT, MODE, TURBULENCE_MODEL):
 
-    run_acoustic_solver(SIMULATION_WORKING_DIRECTORY, RPM_COUNT)
+    run_acoustic_solver(ACOUSTIC_SURFACE, SIMULATION_WORKING_DIRECTORY, RPM_COUNT)
 
     
 
