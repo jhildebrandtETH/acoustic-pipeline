@@ -38,12 +38,18 @@ def run_acoustic_solver(ACOUSTIC_SURFACE, SIMULATION_WORKING_DIRECTORY, RPM):
             / "writePermeableSurfaceFields_referenceGeometry"
         )
 
-
-    create_reference_geometry_vtk_series(
-        surface_directory,
-        acoustic_surface_directory,
-        surface_file="propeller.vtk",
-    )
+    if ACOUSTIC_SURFACE == "impermeable":
+        create_reference_geometry_vtk_series(
+            surface_directory,
+            acoustic_surface_directory,
+            surface_file="propeller.vtk",
+        )
+    else:
+        create_reference_geometry_vtk_series(
+            surface_directory,
+            acoustic_surface_directory,
+            surface_file="permeableSurface.vtk",
+        )
 
 
     rpm = RPM
@@ -73,7 +79,7 @@ def run_acoustic_solver(ACOUSTIC_SURFACE, SIMULATION_WORKING_DIRECTORY, RPM):
 
         solver = F1ASolver.from_openfoam_vtk(
                 acoustic_surface_directory,
-                surface_file="propeller.vtk",
+                surface_file="permeableSurface.vtk",
                 rpm=rpm,
                 permeable=True,
                 moving_surface=True,
