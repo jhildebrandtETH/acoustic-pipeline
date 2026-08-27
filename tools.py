@@ -9,6 +9,1335 @@ import json
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 
+
+
+# ============================================================================
+# TOOLS.PY STRUCTURE
+# ============================================================================
+# 1. Generic status / file-write helpers
+# 2. CLI and configuration validation
+# 3. OpenFOAM single-case execution helpers
+# 4. Parallel batch scheduler / runtime dashboard
+# 5. Resume / reconstruction helpers
+# 6. Mesh, OpenFOAM dictionary, convergence and postprocessing utilities
+# ============================================================================
+
+# ============================================================================
+# PARALLEL BATCH SCHEDULING / STATUS INFRASTRUCTURE
+# ============================================================================
+
+_SIMULATION_ORDER_FILE_LOCK = threading.RLock()
+MATPLOTLIB_LOCK = threading.RLock()
+
+
+def emit_status(status_callback=None, **fields):
+    """Safely emit a structured runtime-status update for one case."""
+    if status_callback is None:
+        return
+
+    try:
+        status_callback(**fields)
+    except Exception:
+        # Monitoring must never be allowed to crash a simulation case.
+        pass
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON through a temporary file and atomically replace the target."""
+    path = Path(path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=4)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.replace(tmp_path, path)
+
+
+# ============================================================================
+# CLI / CONFIGURATION VALIDATION
+# ============================================================================
+
+def validate_acoustic_arguments(parser, args):
+    """Validate coupled acoustic CLI arguments and apply safe defaults."""
+    if (
+        args.acoustic_surface == "impermeable"
+        and args.acoustic_sphere_diameter is not None
+    ):
+        parser.error(
+            "Impermeable acoustic mode was selected but "
+            "--acoustic-sphere-diameter was also supplied. The sphere "
+            "diameter is only used for permeable mode."
+        )
+
+    if (
+        args.acoustic_surface == "permeable"
+        and args.acoustic_sphere_diameter is None
+    ):
+        args.acoustic_sphere_diameter = 2.5
+
+
+# ============================================================================
+# OPENFOAM SINGLE-CASE EXECUTION HELPERS
+# ============================================================================
+
+def report_case_stage(
+    status_callback,
+    stage,
+    detail="",
+    progress=None,
+    error=None,
+):
+    """Report one OpenFOAM stage without letting monitoring affect execution."""
+    fields = {
+        "stage": stage,
+        "detail": detail,
+    }
+
+    if progress is not None:
+        fields["progress"] = progress
+    if error is not None:
+        fields["error"] = error
+
+    emit_status(status_callback, **fields)
+
+
+def run_openfoam_command(
+    container,
+    command,
+    description,
+    status_callback,
+    stage,
+    detail=None,
+    print_output=False,
+):
+    """Execute one Docker/OpenFOAM command and publish start/end status."""
+    report_case_stage(
+        status_callback,
+        stage,
+        detail or f"{description} running",
+    )
+
+    success = safe_exec(
+        container,
+        command,
+        description,
+        print_output=print_output,
+        status_callback=status_callback,
+    )
+
+    if success:
+        report_case_stage(
+            status_callback,
+            stage,
+            f"{description} finished",
+            progress=100.0,
+        )
+    else:
+        # safe_exec already reports the specific Docker/OpenFOAM failure.
+        report_case_stage(
+            status_callback,
+            stage,
+            f"{description} failed",
+        )
+
+    return success
+
+
+def remove_stale_stopped_container(
+    client,
+    container_name,
+    status_callback=None,
+):
+    """Remove an old stopped case container, but never an active one."""
+    # Docker is imported locally so tools.py remains importable for CLI/order
+    # operations even in environments where the Docker SDK is not installed.
+    import docker
+
+    try:
+        existing = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        return
+
+    existing.reload()
+
+    if existing.status == "running":
+        raise RuntimeError(
+            f"Docker container '{container_name}' is already running. "
+            "Refusing to remove a potentially active simulation container."
+        )
+
+    report_case_stage(
+        status_callback,
+        "docker",
+        "removing stale stopped container",
+    )
+    existing.remove(force=True)
+
+
+class SimulationOrderStore:
+    """
+    Thread-safe owner of simulation_order.json.
+
+    Worker threads must not read-modify-write the JSON independently. They report
+    durable state transitions through this object, which serializes and atomically
+    persists every update.
+    """
+
+    def __init__(self, simulations_directory: Path):
+        self.simulations_directory = Path(simulations_directory)
+        self.json_path = self.simulations_directory / "simulation_order.json"
+        self._lock = threading.RLock()
+        self._batch = load_simulation_order(self.simulations_directory)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            # JSON round-trip provides a simple deep copy for this JSON-only data.
+            return json.loads(json.dumps(self._batch))
+
+    def get_case(self, folder_name: str) -> dict:
+        with self._lock:
+            for case in self._batch["cases"]:
+                if case["folder"] == folder_name:
+                    return dict(case)
+
+        raise KeyError(f"Unknown simulation case: {folder_name}")
+
+    def case_status(self, folder_name: str) -> str:
+        return str(self.get_case(folder_name)["status"])
+
+    def update_case(self, folder_name: str, **updates) -> dict:
+        with self._lock:
+            for case in self._batch["cases"]:
+                if case["folder"] == folder_name:
+                    case.update(updates)
+                    case["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    _atomic_write_json(self.json_path, self._batch)
+                    return dict(case)
+
+        raise KeyError(f"Unknown simulation case: {folder_name}")
+
+    def set_status(self, folder_name: str, new_status: str, **updates) -> dict:
+        return self.update_case(folder_name, status=new_status, **updates)
+
+    def mark_failed(
+        self,
+        folder_name: str,
+        error: str,
+        resume_status: str,
+    ) -> dict:
+        return self.update_case(
+            folder_name,
+            status="failed",
+            error=str(error),
+            resume_status=str(resume_status),
+        )
+
+    def persist_batch_fields(self, **updates) -> None:
+        with self._lock:
+            self._batch.update(updates)
+            _atomic_write_json(self.json_path, self._batch)
+
+
+class RuntimeStatusRegistry:
+    """In-memory, thread-safe runtime state used by the live batch dashboard."""
+
+    def __init__(self, cases: list[dict]):
+        self._lock = threading.RLock()
+        self._states = {}
+
+        for case in cases:
+            folder = case["folder"]
+            persisted_status = case.get("status", "pending")
+
+            if persisted_status == "postprocessing_done":
+                runtime_state = "DONE"
+            elif persisted_status == "failed":
+                runtime_state = "FAILED"
+            else:
+                runtime_state = "QUEUED"
+
+            self._states[folder] = {
+                "folder": folder,
+                "mesh": case.get("mesh", ""),
+                "rpm": case.get("rpm", ""),
+                "cores": int(case.get("allocated_cores", case.get("cores", 1))),
+                "state": runtime_state,
+                "stage": persisted_status,
+                "detail": "",
+                "progress": None,
+                "dependency": case.get("depends_on"),
+                "error": case.get("error"),
+                "updated_at": time.time(),
+            }
+
+    def update(self, folder_name: str, **updates) -> None:
+        with self._lock:
+            if folder_name not in self._states:
+                self._states[folder_name] = {
+                    "folder": folder_name,
+                    "mesh": "",
+                    "rpm": "",
+                    "cores": 1,
+                    "state": "QUEUED",
+                    "stage": "",
+                    "detail": "",
+                    "progress": None,
+                    "dependency": None,
+                    "error": None,
+                    "updated_at": time.time(),
+                }
+
+            self._states[folder_name].update(updates)
+            self._states[folder_name]["updated_at"] = time.time()
+
+    def callback_for(self, folder_name: str):
+        def callback(**fields):
+            normalized = dict(fields)
+
+            # Case-level workers may only provide stage/detail/progress; the
+            # scheduler owns the high-level RUNNING/QUEUED/DONE state.
+            self.update(folder_name, **normalized)
+
+        return callback
+
+    def get(self, folder_name: str) -> dict:
+        with self._lock:
+            if folder_name not in self._states:
+                raise KeyError(f"Unknown runtime case: {folder_name}")
+            return dict(self._states[folder_name])
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return [dict(value) for value in self._states.values()]
+
+
+class LiveBatchDashboard:
+    """
+    Render a self-refreshing terminal overview.
+
+    Running cases are always shown first. Queued and dependency-waiting cases are
+    grouped in a second table below them, followed by failed cases when present.
+    """
+
+    def __init__(
+        self,
+        registry: RuntimeStatusRegistry,
+        total_cores: int,
+        cores_per_case: int,
+        max_cores_per_case: int | None = None,
+        refresh_interval: float = 1.0,
+    ):
+        import sys
+
+        self.registry = registry
+        self.total_cores = int(total_cores)
+        self.cores_per_case = int(cores_per_case)
+        self.max_cores_per_case = int(
+            max_cores_per_case
+            if max_cores_per_case is not None
+            else cores_per_case
+        )
+        self.refresh_interval = float(refresh_interval)
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._is_tty = bool(sys.stdout.isatty())
+        self._last_non_tty_render = 0.0
+
+    @staticmethod
+    def _clip(value, width):
+        text = "" if value is None else str(value)
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[: width - 3] + "..."
+
+    @staticmethod
+    def _progress_text(value):
+        if value is None:
+            return "-"
+
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+        return f"{value:6.2f}%"
+
+    def _table(self, title: str, rows: list[dict]) -> list[str]:
+        lines = [title]
+        lines.append(
+            f"{'Case':36} {'Cores':>5} {'Stage':20} {'Progress':>10}  Detail"
+        )
+        lines.append("-" * 100)
+
+        if not rows:
+            lines.append("(none)")
+            return lines
+
+        for item in rows:
+            detail = item.get("detail") or ""
+
+            if item.get("state") == "WAITING_INIT" and item.get("dependency"):
+                detail = f"waiting for {item['dependency']}"
+
+            if item.get("state") == "FAILED" and item.get("error"):
+                detail = item["error"]
+
+            lines.append(
+                f"{self._clip(item.get('folder'), 36):36} "
+                f"{int(item.get('cores', 0)):>5} "
+                f"{self._clip(item.get('stage'), 20):20} "
+                f"{self._progress_text(item.get('progress')):>10}  "
+                f"{self._clip(detail, 55)}"
+            )
+
+        return lines
+
+    def render_text(self) -> str:
+        states = self.registry.snapshot()
+
+        running = sorted(
+            (item for item in states if item.get("state") == "RUNNING"),
+            key=lambda item: item["folder"],
+        )
+        queued = sorted(
+            (
+                item
+                for item in states
+                if item.get("state") in {"QUEUED", "WAITING_INIT"}
+            ),
+            key=lambda item: (
+                0 if item.get("state") == "QUEUED" else 1,
+                item["folder"],
+            ),
+        )
+        failed = sorted(
+            (item for item in states if item.get("state") in {"FAILED", "BLOCKED"}),
+            key=lambda item: item["folder"],
+        )
+        done_count = sum(item.get("state") == "DONE" for item in states)
+        used_cores = sum(int(item.get("cores", 0)) for item in running)
+
+        lines = [
+            "ACOUSTIC PIPELINE - PARALLEL SIMULATION ORDER",
+            (
+                f"Total cores: {self.total_cores} | Used: {used_cores} | "
+                f"Case cores: "
+                f"{self.cores_per_case}"
+                f"{('-' + str(self.max_cores_per_case)) if self.max_cores_per_case != self.cores_per_case else ''} | "
+                f"Running: {len(running)} | "
+                f"Queued/waiting: {len(queued)} | Done: {done_count} | "
+                f"Failed/blocked: {len(failed)}"
+            ),
+            "",
+        ]
+
+        lines.extend(self._table("RUNNING CASES", running))
+        lines.append("")
+        lines.extend(self._table("QUEUED / WAITING CASES", queued))
+
+        if failed:
+            lines.append("")
+            lines.extend(self._table("FAILED / BLOCKED CASES", failed))
+
+        return "\n".join(lines)
+
+    def _run(self):
+        while not self._stop_event.wait(self.refresh_interval):
+            now = time.time()
+
+            if self._is_tty:
+                print("\033[H\033[J" + self.render_text(), end="", flush=True)
+            elif now - self._last_non_tty_render >= 30.0:
+                # In redirected output / SLURM logs, avoid ANSI escape spam.
+                print("\n" + self.render_text(), flush=True)
+                self._last_non_tty_render = now
+
+    def start(self):
+        if self._thread is not None:
+            return
+
+        self._thread = threading.Thread(
+            target=self._run,
+            name="batch-dashboard",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, final_render=True):
+        self._stop_event.set()
+
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+        if final_render:
+            if self._is_tty:
+                print("\033[H\033[J" + self.render_text(), flush=True)
+            else:
+                print("\n" + self.render_text(), flush=True)
+
+
+def calculate_scheduler_layout(
+    cases: list[dict],
+    total_cores: int,
+    field_init: str,
+    study: bool,
+) -> dict:
+    """Return slot count and near-equal core allocation for maximum throughput."""
+    total_cores = int(total_cores)
+
+    if total_cores < 1:
+        raise ValueError("total_cores must be at least 1")
+    if not cases:
+        raise ValueError("Simulation order contains no cases")
+
+    dependency_mode = str(field_init).lower() == "on" and not bool(study)
+
+    if dependency_mode:
+        parallel_units = len({case["mesh"] for case in cases})
+    else:
+        parallel_units = len(cases)
+
+    max_parallel_cases = max(1, min(parallel_units, total_cores))
+    base_cores = max(1, total_cores // max_parallel_cases)
+    extra_core_slots = total_cores % max_parallel_cases
+    max_cores = base_cores + (1 if extra_core_slots else 0)
+
+    return {
+        "total_cores": total_cores,
+        "cores_per_case": base_cores,
+        "max_cores_per_case": max_cores,
+        "extra_core_slots": extra_core_slots,
+        "max_parallel_cases": max_parallel_cases,
+        "dependency_mode": dependency_mode,
+    }
+
+
+def assign_case_core_allocations(
+    cases: list[dict],
+    layout: dict,
+    field_init: str,
+    study: bool,
+) -> None:
+    """Assign each case its fixed MPI/serial core count for this order."""
+    base_cores = int(layout["cores_per_case"])
+    extra_slots = int(layout.get("extra_core_slots", 0))
+    dependency_mode = str(field_init).lower() == "on" and not bool(study)
+
+    if dependency_mode:
+        mesh_order = []
+        for case in cases:
+            if case["mesh"] not in mesh_order:
+                mesh_order.append(case["mesh"])
+
+        mesh_cores = {
+            mesh: base_cores + (1 if index < extra_slots else 0)
+            for index, mesh in enumerate(mesh_order)
+        }
+        for case in cases:
+            case["allocated_cores"] = mesh_cores[case["mesh"]]
+        return
+
+    # If there are more cases than cores, base_cores is 1 and extra_slots is 0,
+    # so every queued case naturally uses one core as slots become available.
+    for index, case in enumerate(cases):
+        case["allocated_cores"] = base_cores + (1 if index < extra_slots else 0)
+
+
+def add_field_initialization_dependencies(cases: list[dict], field_init: str, study: bool) -> None:
+    """Mutate case entries so each mesh forms an explicit RPM dependency chain."""
+    dependency_mode = str(field_init).lower() == "on" and not bool(study)
+    previous_case_by_mesh = {}
+
+    for case in cases:
+        if dependency_mode:
+            dependency = previous_case_by_mesh.get(case["mesh"])
+            case["depends_on"] = dependency
+            previous_case_by_mesh[case["mesh"]] = case["folder"]
+        else:
+            case["depends_on"] = None
+
+
+def ensure_scheduler_metadata(
+    order: dict,
+    total_cores_override: int | None = None,
+) -> dict:
+    """Upgrade simulation_order.json data to the parallel-scheduler schema."""
+    if "total_cores" not in order:
+        # In the sequential pipeline, ``cores`` meant cores PER case. It is
+        # therefore unsafe to reinterpret that legacy field as the new TOTAL
+        # order budget. The caller must explicitly supply the new budget.
+        if total_cores_override is None:
+            raise ValueError(
+                "Legacy simulation order detected. Its 'cores' field means "
+                "cores per case, not total order cores. Resume it once with "
+                "--total-cores <available cores> to migrate safely."
+            )
+        order["total_cores"] = int(total_cores_override)
+
+    order["schema_version"] = 2
+
+    if any("depends_on" not in case for case in order.get("cases", [])):
+        add_field_initialization_dependencies(
+            order["cases"],
+            order.get("field_init", "off"),
+            order.get("study", False),
+        )
+
+    layout = calculate_scheduler_layout(
+        order["cases"],
+        order["total_cores"],
+        order.get("field_init", "off"),
+        order.get("study", False),
+    )
+
+    order.setdefault("cores_per_case", layout["cores_per_case"])
+    order.setdefault("max_cores_per_case", layout["max_cores_per_case"])
+    order.setdefault("extra_core_slots", layout["extra_core_slots"])
+    order.setdefault("max_parallel_cases", layout["max_parallel_cases"])
+
+    if any("allocated_cores" not in case for case in order["cases"]):
+        assign_case_core_allocations(
+            order["cases"],
+            layout,
+            order.get("field_init", "off"),
+            order.get("study", False),
+        )
+
+    for case in order["cases"]:
+        case.setdefault("resume_status", None)
+        case.setdefault("error", None)
+
+    return order
+
+
+def dependency_state(case: dict, status_by_folder: dict[str, str]) -> tuple[str, str | None]:
+    """Return READY, WAITING, or BLOCKED plus a human-readable reason."""
+    dependency = case.get("depends_on")
+
+    if not dependency:
+        return "READY", None
+
+    dependency_status = status_by_folder.get(dependency)
+
+    if dependency_status == "postprocessing_done":
+        return "READY", None
+
+    if dependency_status in {"failed", "blocked"}:
+        return "BLOCKED", f"initialization dependency failed: {dependency}"
+
+    return "WAITING", f"waiting for initialization source: {dependency}"
+
+
+def initialize_runtime_queue_states(order: dict, registry: RuntimeStatusRegistry) -> None:
+    """Set initial QUEUED/WAITING/BLOCKED dashboard states from dependencies."""
+    status_by_folder = {
+        case["folder"]: case.get("status", "pending")
+        for case in order["cases"]
+    }
+
+    for case in order["cases"]:
+        folder = case["folder"]
+        status = case.get("status", "pending")
+
+        if status == "postprocessing_done":
+            registry.update(folder, state="DONE", stage="complete", progress=100.0)
+            continue
+
+        if status == "failed":
+            registry.update(
+                folder,
+                state="FAILED",
+                stage="failed",
+                error=case.get("error"),
+            )
+            continue
+
+        dep_state, reason = dependency_state(case, status_by_folder)
+
+        if dep_state == "READY":
+            registry.update(folder, state="QUEUED", stage=status, detail="ready")
+        elif dep_state == "WAITING":
+            registry.update(folder, state="WAITING_INIT", stage="waiting_init", detail=reason)
+        else:
+            registry.update(folder, state="BLOCKED", stage="blocked", detail=reason, error=reason)
+
+
+def runnable_cases(order: dict, running_folders: set[str]) -> list[dict]:
+    """Return currently dependency-ready, non-terminal cases in stable order."""
+    status_by_folder = {
+        case["folder"]: case.get("status", "pending")
+        for case in order["cases"]
+    }
+
+    ready = []
+
+    for case in order["cases"]:
+        folder = case["folder"]
+
+        if folder in running_folders:
+            continue
+
+        if case.get("status") in {"postprocessing_done", "failed", "blocked"}:
+            continue
+
+        dep_state, _ = dependency_state(case, status_by_folder)
+
+        if dep_state == "READY":
+            ready.append(case)
+
+    return ready
+
+
+def refresh_dependency_runtime_states(order: dict, registry: RuntimeStatusRegistry, running_folders: set[str]) -> None:
+    """Refresh queued/waiting/blocked dashboard state after a case transition."""
+    status_by_folder = {
+        case["folder"]: case.get("status", "pending")
+        for case in order["cases"]
+    }
+
+    for case in order["cases"]:
+        folder = case["folder"]
+
+        if folder in running_folders:
+            continue
+
+        status = case.get("status", "pending")
+
+        if status == "postprocessing_done":
+            registry.update(folder, state="DONE", stage="complete", progress=100.0, detail="finished")
+            continue
+
+        if status == "failed":
+            registry.update(folder, state="FAILED", stage="failed", error=case.get("error"))
+            continue
+
+        if status == "blocked":
+            registry.update(folder, state="BLOCKED", stage="blocked", error=case.get("error"))
+            continue
+
+        dep_state, reason = dependency_state(case, status_by_folder)
+
+        if dep_state == "READY":
+            registry.update(folder, state="QUEUED", stage=status, detail="ready", progress=None)
+        elif dep_state == "WAITING":
+            registry.update(folder, state="WAITING_INIT", stage="waiting_init", detail=reason, progress=None)
+        else:
+            registry.update(folder, state="BLOCKED", stage="blocked", detail=reason, error=reason)
+
+
+def block_cases_with_failed_dependencies(order_store: SimulationOrderStore, registry: RuntimeStatusRegistry) -> None:
+    """
+    Persist BLOCKED for every descendant of a failed initialization source.
+
+    This is intentionally iterative. If A_3000 fails, A_4000 becomes blocked;
+    that new durable state must then immediately block A_5000 in the same
+    scheduler cycle instead of leaving a temporary dependency deadlock.
+    """
+    while True:
+        order = order_store.snapshot()
+        status_by_folder = {
+            case["folder"]: case.get("status", "pending")
+            for case in order["cases"]
+        }
+        newly_blocked = 0
+
+        for case in order["cases"]:
+            if case.get("status") in {"postprocessing_done", "failed", "blocked"}:
+                continue
+
+            dep_state, reason = dependency_state(case, status_by_folder)
+
+            if dep_state == "BLOCKED":
+                order_store.set_status(
+                    case["folder"],
+                    "blocked",
+                    error=reason,
+                    resume_status=case.get("status", "pending"),
+                )
+                registry.update(
+                    case["folder"],
+                    state="BLOCKED",
+                    stage="blocked",
+                    detail=reason,
+                    error=reason,
+                    progress=None,
+                )
+                newly_blocked += 1
+
+        if newly_blocked == 0:
+            return
+
+
+def reactivate_failed_cases_for_resume(
+    order_store: SimulationOrderStore,
+    simulations_directory: Path,
+) -> None:
+    """Reactivate failed/blocked cases using their stored durable resume point."""
+    order = order_store.snapshot()
+
+    for case in order["cases"]:
+        status = case.get("status")
+
+        if status == "failed":
+            resume_status = case.get("resume_status")
+
+            if resume_status not in {
+                "pending",
+                "preprocessing_done",
+                "solver_running",
+                "solver_done",
+            }:
+                simulation_path = Path(simulations_directory) / case["folder"]
+                processor0 = simulation_path / "processor0"
+
+                if has_timestep(processor0) or has_timestep(simulation_path):
+                    resume_status = "solver_running"
+                else:
+                    resume_status = "pending"
+
+            order_store.set_status(
+                case["folder"],
+                resume_status,
+                error=None,
+                resume_status=None,
+            )
+
+        elif status == "blocked":
+            # Dependency state is recalculated after failed parent cases are
+            # reactivated, so descendants return to their prior durable state.
+            fallback = case.get("resume_status") or "pending"
+            order_store.set_status(
+                case["folder"],
+                fallback,
+                error=None,
+                resume_status=None,
+            )
+
+
+# ============================================================================
+# CASE WORKER / RESOURCE-AWARE SCHEDULER
+# ============================================================================
+
+def resume_status_after_solver_failure(simulation_path: Path) -> str:
+    processor0_path = simulation_path / "processor0"
+
+    if has_timestep(processor0_path) or has_timestep(simulation_path):
+        return "solver_running"
+
+    return "pending"
+
+
+def execute_simulation_case(
+    case,
+    pipeline_main_directory,
+    simulations_directory,
+    source_meshes_directory,
+    source_meshes,
+    order_store,
+    registry,
+    args,
+    convergence_monitoring_revolutions_count=1000,
+    convergence_tolerance=1e-3,
+):
+    """Execute one durable case state machine inside one worker thread."""
+    # Local imports avoid circular imports: preprocessing/openfoamSimulation/
+    # postprocessing themselves import helpers from tools.py.
+    from openfoamSimulation import openfoamSimulation
+    from postprocessing import postprocessing
+    from preprocessing import preprocessing
+
+    folder_name = case["folder"]
+    mesh = case["mesh"]
+    rpm = int(case["rpm"])
+    mode = case["mode"]
+    is_study_case = bool(case["study"])
+    allocated_cores = int(case["allocated_cores"])
+    dependency = case.get("depends_on")
+    callback = registry.callback_for(folder_name)
+
+    simulation_path = simulations_directory / folder_name
+    simulation_path.mkdir(parents=True, exist_ok=True)
+
+    registry.update(
+        folder_name,
+        state="RUNNING",
+        stage="starting",
+        detail=f"worker started | {allocated_cores} core(s)",
+        progress=None,
+        error=None,
+    )
+
+    if mesh not in source_meshes:
+        error = (
+            f"Source mesh '{mesh}' was not found in {source_meshes_directory}"
+        )
+        order_store.mark_failed(folder_name, error, resume_status="pending")
+        registry.update(
+            folder_name,
+            state="FAILED",
+            stage="failed",
+            error=error,
+            detail=error,
+        )
+        return False
+
+    previous_simulation_path = (
+        simulations_directory / dependency
+        if dependency is not None
+        else None
+    )
+    use_previous_init = (
+        args.field_init == "on"
+        and dependency is not None
+        and not is_study_case
+    )
+
+    status = order_store.case_status(folder_name)
+
+    try:
+        while status != "postprocessing_done":
+            # --------------------------------------------------------------
+            # PREPROCESSING
+            # --------------------------------------------------------------
+            if status == "pending":
+                registry.update(
+                    folder_name,
+                    stage="preprocessing",
+                    detail="preparing case",
+                    progress=None,
+                )
+
+                preprocessing_kwargs = dict(
+                    SIMULATION_NAME=folder_name,
+                    RPM_COUNT=rpm,
+                    MAIN_DIRECTORY=pipeline_main_directory,
+                    TARGET_DIRECTORY=simulation_path,
+                    CORES_TO_USE=allocated_cores,
+                    MODE=mode,
+                    INIT_FROM_PREVIOUS=use_previous_init,
+                    PREVIOUS_SIMULATION_PATH=previous_simulation_path,
+                    TURBULENCE_MODEL=args.turbulence,
+                    ACOUSTIC_SURFACE=args.acoustic_surface,
+                    ACOUSTIC_SPHERE_DIAMETER=args.acoustic_sphere_diameter,
+                    STATUS_CALLBACK=callback,
+                )
+
+                if is_study_case:
+                    preprocessing_kwargs.update(
+                        STUDY_PARAMETER_NAME=case["study_parameter"],
+                        STUDY_PARAMETER_FILE=case["study_file"],
+                        STUDY_PARAMETER=case["study_value"],
+                    )
+
+                preprocessing(**preprocessing_kwargs)
+                order_store.set_status(
+                    folder_name,
+                    "preprocessing_done",
+                    error=None,
+                    resume_status=None,
+                )
+                status = "preprocessing_done"
+                continue
+
+            # --------------------------------------------------------------
+            # NEW SOLVER START
+            # --------------------------------------------------------------
+            if status == "preprocessing_done":
+                order_store.set_status(
+                    folder_name,
+                    "solver_running",
+                    error=None,
+                    resume_status=None,
+                )
+                status = "solver_running"
+
+                success = openfoamSimulation(
+                    resume=False,
+                    simulation_name=folder_name,
+                    simulation_working_directory=simulation_path,
+                    convergence_tolerance=convergence_tolerance,
+                    rpm_count=rpm,
+                    convergence_window_revolutions=(
+                        convergence_monitoring_revolutions_count
+                    ),
+                    MODE=mode,
+                    END_ON_MODE=args.end_on,
+                    TURBULENCE_MODEL=args.turbulence,
+                    initialize_from_previous=use_previous_init,
+                    previous_simulation_path=previous_simulation_path,
+                    NUMBER_OF_CORES=allocated_cores,
+                    MESH_ONLY=args.mesh_only,
+                    ALLOW_BAD_MESH=args.allow_bad_mesh,
+                    STATUS_CALLBACK=callback,
+                )
+
+                if not success:
+                    resume_status = resume_status_after_solver_failure(
+                        simulation_path
+                    )
+                    error = (
+                        registry.get(folder_name).get("error")
+                        or "OpenFOAM stage returned failure"
+                    )
+                    order_store.mark_failed(
+                        folder_name,
+                        error=error,
+                        resume_status=resume_status,
+                    )
+                    registry.update(
+                        folder_name,
+                        state="FAILED",
+                        stage="failed",
+                        detail=error,
+                        error=error,
+                        progress=None,
+                    )
+                    return False
+
+                order_store.set_status(
+                    folder_name,
+                    "solver_done",
+                    error=None,
+                    resume_status=None,
+                )
+                status = "solver_done"
+                continue
+
+            # --------------------------------------------------------------
+            # SOLVER RESUME
+            # --------------------------------------------------------------
+            if status == "solver_running":
+                processor0_path = simulation_path / "processor0"
+                has_any_timestep = (
+                    has_timestep(processor0_path)
+                    or has_timestep(simulation_path)
+                )
+
+                if not has_any_timestep:
+                    callback(
+                        stage="resume",
+                        detail="no timestep found; moving case aside and restarting cleanly",
+                        progress=None,
+                    )
+                    reset_case_folder(
+                        simulation_path,
+                        status_callback=callback,
+                    )
+                    order_store.set_status(
+                        folder_name,
+                        "pending",
+                        error=None,
+                        resume_status=None,
+                    )
+                    status = "pending"
+                    continue
+
+                safe_time = get_safe_timestep(simulation_path)
+
+                if safe_time is None:
+                    callback(
+                        stage="resume",
+                        detail="no usable safe timestep; restarting cleanly",
+                    )
+                    reset_case_folder(
+                        simulation_path,
+                        status_callback=callback,
+                    )
+                    order_store.set_status(
+                        folder_name,
+                        "pending",
+                        error=None,
+                        resume_status=None,
+                    )
+                    status = "pending"
+                    continue
+
+                callback(
+                    stage="resume",
+                    detail=f"resuming from safe timestep {safe_time}",
+                )
+
+                success = openfoamSimulation(
+                    resume=True,
+                    simulation_name=folder_name,
+                    simulation_working_directory=simulation_path,
+                    convergence_tolerance=convergence_tolerance,
+                    rpm_count=rpm,
+                    convergence_window_revolutions=(
+                        convergence_monitoring_revolutions_count
+                    ),
+                    MODE=mode,
+                    END_ON_MODE=args.end_on,
+                    TURBULENCE_MODEL=args.turbulence,
+                    initialize_from_previous=use_previous_init,
+                    previous_simulation_path=previous_simulation_path,
+                    NUMBER_OF_CORES=allocated_cores,
+                    MESH_ONLY=args.mesh_only,
+                    ALLOW_BAD_MESH=args.allow_bad_mesh,
+                    STATUS_CALLBACK=callback,
+                )
+
+                if not success:
+                    resume_status = resume_status_after_solver_failure(
+                        simulation_path
+                    )
+                    error = (
+                        registry.get(folder_name).get("error")
+                        or "OpenFOAM resume stage returned failure"
+                    )
+                    order_store.mark_failed(
+                        folder_name,
+                        error=error,
+                        resume_status=resume_status,
+                    )
+                    registry.update(
+                        folder_name,
+                        state="FAILED",
+                        stage="failed",
+                        detail=error,
+                        error=error,
+                    )
+                    return False
+
+                order_store.set_status(
+                    folder_name,
+                    "solver_done",
+                    error=None,
+                    resume_status=None,
+                )
+                status = "solver_done"
+                continue
+
+            # --------------------------------------------------------------
+            # POSTPROCESSING
+            # --------------------------------------------------------------
+            if status == "solver_done":
+                if args.mesh_only:
+                    order_store.set_status(
+                        folder_name,
+                        "postprocessing_done",
+                        error=None,
+                        resume_status=None,
+                    )
+                    status = "postprocessing_done"
+                    continue
+
+                registry.update(
+                    folder_name,
+                    stage="postprocessing",
+                    detail="starting postprocessing",
+                    progress=0.0,
+                )
+
+                postprocessing(
+                    ACOUSTIC_SURFACE=args.acoustic_surface,
+                    SIMULATION_WORKING_DIRECTORY=simulation_path,
+                    RPM_COUNT=rpm,
+                    MODE=mode,
+                    TURBULENCE_MODEL=args.turbulence,
+                    STATUS_CALLBACK=callback,
+                )
+
+                order_store.set_status(
+                    folder_name,
+                    "postprocessing_done",
+                    error=None,
+                    resume_status=None,
+                )
+                status = "postprocessing_done"
+                continue
+
+            raise ValueError(
+                f"Unknown case status for {folder_name}: {status}"
+            )
+
+        registry.update(
+            folder_name,
+            state="DONE",
+            stage="complete",
+            detail="finished",
+            progress=100.0,
+            error=None,
+        )
+        return True
+
+    except Exception as error:
+        if status == "solver_done":
+            resume_status = "solver_done"
+        elif status == "solver_running":
+            resume_status = resume_status_after_solver_failure(
+                simulation_path
+            )
+        elif status == "preprocessing_done":
+            resume_status = "preprocessing_done"
+        else:
+            resume_status = "pending"
+
+        order_store.mark_failed(
+            folder_name,
+            error=str(error),
+            resume_status=resume_status,
+        )
+        registry.update(
+            folder_name,
+            state="FAILED",
+            stage="failed",
+            detail=str(error),
+            error=str(error),
+            progress=None,
+        )
+        return False
+
+
+def run_parallel_scheduler(
+    pipeline_main_directory,
+    simulations_directory,
+    source_meshes_directory,
+    source_meshes,
+    order_store,
+    registry,
+    args,
+    convergence_monitoring_revolutions_count=1000,
+    convergence_tolerance=1e-3,
+    scheduler_poll_interval=0.5,
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    order = order_store.snapshot()
+    max_parallel_cases = int(order["max_parallel_cases"])
+    total_cores = int(order["total_cores"])
+    cores_per_case = int(order["cores_per_case"])
+
+    dashboard = LiveBatchDashboard(
+        registry=registry,
+        total_cores=total_cores,
+        cores_per_case=cores_per_case,
+        max_cores_per_case=int(order.get("max_cores_per_case", cores_per_case)),
+        refresh_interval=1.0,
+    )
+
+    executor = ThreadPoolExecutor(
+        max_workers=max_parallel_cases,
+        thread_name_prefix="simulation-case",
+    )
+    running_futures = {}
+    dashboard.start()
+
+    try:
+        while True:
+            # Collect completed workers first so their slots can be reused
+            # immediately by newly dependency-ready cases.
+            for future, folder in list(running_futures.items()):
+                if future.done():
+                    try:
+                        future.result()
+                    except Exception as error:
+                        # _execute_case is defensive, but keep the scheduler alive
+                        # even if an unexpected worker exception escapes.
+                        order_store.mark_failed(
+                            folder,
+                            error=f"Unhandled worker error: {error}",
+                            resume_status="pending",
+                        )
+                        registry.update(
+                            folder,
+                            state="FAILED",
+                            stage="failed",
+                            detail=f"Unhandled worker error: {error}",
+                            error=str(error),
+                        )
+
+                    del running_futures[future]
+
+            block_cases_with_failed_dependencies(order_store, registry)
+            order = order_store.snapshot()
+            running_folders = set(running_futures.values())
+
+            refresh_dependency_runtime_states(
+                order,
+                registry,
+                running_folders,
+            )
+
+            terminal_statuses = {
+                "postprocessing_done",
+                "failed",
+                "blocked",
+            }
+            unfinished = [
+                case
+                for case in order["cases"]
+                if case.get("status") not in terminal_statuses
+            ]
+
+            if not unfinished and not running_futures:
+                break
+
+            free_slots = max_parallel_cases - len(running_futures)
+
+            if free_slots > 0:
+                ready = runnable_cases(order, running_folders)
+
+                for case in ready[:free_slots]:
+                    folder = case["folder"]
+                    registry.update(
+                        folder,
+                        state="RUNNING",
+                        stage="starting",
+                        detail="assigned scheduler slot",
+                        progress=None,
+                        error=None,
+                    )
+
+                    future = executor.submit(
+                        execute_simulation_case,
+                        case,
+                        pipeline_main_directory,
+                        simulations_directory,
+                        source_meshes_directory,
+                        source_meshes,
+                        order_store,
+                        registry,
+                        args,
+                        convergence_monitoring_revolutions_count,
+                        convergence_tolerance,
+                    )
+                    running_futures[future] = folder
+
+            if not running_futures:
+                # If no worker is running and no case can be launched, the order
+                # is dependency-deadlocked. Failed dependencies should already be
+                # marked BLOCKED above, so this catches malformed dependency data.
+                order = order_store.snapshot()
+                ready = runnable_cases(order, set())
+                unfinished = [
+                    case
+                    for case in order["cases"]
+                    if case.get("status") not in terminal_statuses
+                ]
+
+                if unfinished and not ready:
+                    raise RuntimeError(
+                        "Scheduler deadlock: unfinished cases remain but none "
+                        "are runnable. Check depends_on entries in simulation_order.json."
+                    )
+
+            time.sleep(scheduler_poll_interval)
+
+    finally:
+        executor.shutdown(wait=True, cancel_futures=False)
+        dashboard.stop(final_render=True)
+
+
+
+# ============================================================================
+# OPENFOAM TIME-DIRECTORY / RESUME HELPERS
+# ============================================================================
+
 def _numeric_time_directories(directory, maximum_time=None):
     """Return numeric OpenFOAM time-directory names up to maximum_time."""
     directory = Path(directory)
@@ -40,7 +1369,11 @@ def _numeric_time_directories(directory, maximum_time=None):
     return time_names
 
 
-def reconstructed_history_is_complete(simulation_directory, safe_time):
+def reconstructed_history_is_complete(
+    simulation_directory,
+    safe_time,
+    status_callback=None,
+):
     """Check that every processor0 time up to safe_time exists reconstructed."""
     simulation_directory = Path(simulation_directory)
     processor0_directory = simulation_directory / "processor0"
@@ -53,9 +1386,13 @@ def reconstructed_history_is_complete(simulation_directory, safe_time):
     )
 
     if not expected_times:
-        print(
-            f"No decomposed time directories up to {safe_time} were found in "
-            f"'{processor0_directory}'."
+        emit_status(
+            status_callback,
+            stage="resume_check",
+            detail=(
+                f"No decomposed time directories up to {safe_time} were found "
+                f"in {processor0_directory}"
+            ),
         )
         return False
 
@@ -63,18 +1400,19 @@ def reconstructed_history_is_complete(simulation_directory, safe_time):
 
     if missing_times:
         missing_times = sorted(missing_times, key=Decimal)
-        print(
-            "Resume reconstruction is incomplete. The following time "
-            f"directories are still missing in the case root: {missing_times}"
+        emit_status(
+            status_callback,
+            stage="resume_check",
+            detail=f"Reconstruction incomplete; missing {len(missing_times)} time directories",
         )
         return False
 
-    print(
-        f"Verified {len(expected_times)} reconstructed time directories "
-        f"through safe time {safe_time}."
+    emit_status(
+        status_callback,
+        stage="resume_check",
+        detail=f"Verified {len(expected_times)} reconstructed time directories through {safe_time}",
     )
     return True
-
 
 
 def _run_reconstruction_with_progress(
@@ -83,11 +1421,9 @@ def _run_reconstruction_with_progress(
     description,
     simulation_directory,
     maximum_time=None,
+    status_callback=None,
 ):
-    """
-    Run reconstructPar while displaying one-line filesystem progress.
-    """
-
+    """Run reconstructPar while reporting filesystem progress."""
     reconstruction_stop_event = threading.Event()
 
     reconstruction_thread = threading.Thread(
@@ -97,22 +1433,20 @@ def _run_reconstruction_with_progress(
             "maximum_time": maximum_time,
             "check_interval": 2,
             "stop_event": reconstruction_stop_event,
+            "status_callback": status_callback,
         },
         name="reconstruct-par-progress-monitor",
         daemon=True,
     )
-
     reconstruction_thread.start()
 
-    reconstruction_successful = False
-
     try:
-        reconstruction_successful = safe_exec(
+        return safe_exec(
             container,
             command,
             description,
+            status_callback=status_callback,
         )
-
     finally:
         reconstruction_stop_event.set()
 
@@ -120,13 +1454,16 @@ def _run_reconstruction_with_progress(
             reconstruction_thread.join(timeout=10)
 
         if reconstruction_thread.is_alive():
-            print(
-                "WARNING: Reconstruction progress monitor did not "
-                "stop within timeout."
+            emit_status(
+                status_callback,
+                stage="reconstructing",
+                detail="WARNING: reconstruction progress monitor did not stop within timeout",
             )
 
-    return reconstruction_successful
 
+# ============================================================================
+# GEOMETRY / OPENFOAM DICTIONARY PARSING
+# ============================================================================
 
 def find_source_stls(source_meshes_directory: Path) -> dict[str, Path]:
     """
@@ -584,25 +1921,82 @@ def read_openfoam_timestep_and_courant_statistics(
     return result
 
 
-def safe_exec(container, cmd, description="command", print_output=False):
+# ============================================================================
+# DOCKER EXECUTION / CASE INTEGRITY
+# ============================================================================
+
+def safe_exec(
+    container,
+    cmd,
+    description="command",
+    print_output=False,
+    status_callback=None,
+):
+    """
+    Execute a Docker command with streamed output and a real exit-code check.
+
+    Only a small tail of command output is retained in Python memory. If a
+    command fails, the last non-empty output line is sent to the batch
+    dashboard so the user gets more than only an exit code. Full output still
+    remains in the command-specific OpenFOAM log files.
+    """
+    from collections import deque
+
+    output_tail = deque(maxlen=12)
+
     try:
         container.reload()
 
         if container.status != "running":
-            print(f"Container is not running before {description}.")
+            message = f"Container is not running before {description}"
+            emit_status(status_callback, detail=message, error=message)
+            if status_callback is None:
+                print(message + ".")
             return False
 
-        result = container.exec_run(cmd, stream=True)
+        api = container.client.api
+        exec_data = api.exec_create(
+            container.id,
+            cmd,
+            stdout=True,
+            stderr=True,
+        )
+        exec_id = exec_data["Id"]
+        output_stream = api.exec_start(exec_id, stream=True)
 
-        for line in result.output:
-            if print_output:
-                print(line.decode("utf-8", errors="ignore").strip())
+        for raw_line in output_stream:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if line:
+                output_tail.append(line)
+            if print_output and status_callback is None:
+                print(line)
+
+        inspect = api.exec_inspect(exec_id)
+        exit_code = inspect.get("ExitCode")
+
+        if exit_code != 0:
+            last_line = output_tail[-1] if output_tail else "no command output"
+            message = (
+                f"{description} exited with code {exit_code}: {last_line}"
+            )
+            emit_status(status_callback, detail=message, error=message)
+            if status_callback is None:
+                print(message)
+            return False
 
         return True
 
-    except Exception as e:
-        print(f"{description} failed: {e}")
+    except Exception as error:
+        message = f"{description} failed: {error}"
+        emit_status(
+            status_callback,
+            detail=message,
+            error=message,
+        )
+        if status_callback is None:
+            print(message)
         return False
+
 
 def processor_deletion_is_safe(
     PATH_TO_CONTROL_DICT_PARAMETERS,
@@ -717,7 +2111,11 @@ def processor_deletion_is_safe(
 
     return True
 
-def merge_postprocessing_dat_files(case_dir: Path, function_object_name: str) -> Path | None:
+# ============================================================================
+# POSTPROCESSING FILE UTILITIES
+# ============================================================================
+
+def merge_postprocessing_dat_files(case_dir: Path, function_object_name: str, quiet=False) -> Path | None:
     """
     Merge all .dat files from postProcessing/<function_object_name>/<timeFolder>/ into
     one combined .dat file.
@@ -733,7 +2131,8 @@ def merge_postprocessing_dat_files(case_dir: Path, function_object_name: str) ->
     function_dir = Path(case_dir) / "postProcessing" / function_object_name
 
     if not function_dir.exists():
-        print(f"No postProcessing folder found for: {function_object_name}")
+        if not quiet:
+            print(f"No postProcessing folder found for: {function_object_name}")
         return None
 
     dat_files = []
@@ -751,7 +2150,8 @@ def merge_postprocessing_dat_files(case_dir: Path, function_object_name: str) ->
             dat_files.append((start_time, dat_file))
 
     if not dat_files:
-        print(f"No .dat files found for: {function_object_name}")
+        if not quiet:
+            print(f"No .dat files found for: {function_object_name}")
         return None
 
     dat_files.sort(key=lambda item: item[0])
@@ -808,17 +2208,30 @@ def merge_postprocessing_dat_files(case_dir: Path, function_object_name: str) ->
 
 
 
-def reset_case_folder(simulation_path: Path):
+# ============================================================================
+# SIMULATION ORDER PERSISTENCE / CASE STATE
+# ============================================================================
+
+def reset_case_folder(simulation_path: Path, status_callback=None):
+    simulation_path = Path(simulation_path)
+
     if simulation_path.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         broken_path = simulation_path.with_name(
             simulation_path.name + f"_BROKEN_{timestamp}"
         )
-
         simulation_path.rename(broken_path)
-        print(f"Moved broken case to: {broken_path}")
+        emit_status(
+            status_callback,
+            stage="reset",
+            detail=f"Moved broken case to {broken_path.name}",
+        )
+
+        if status_callback is None:
+            print(f"Moved broken case to: {broken_path}")
 
     simulation_path.mkdir(parents=True, exist_ok=True)
+
 
 def make_folder_safe(value: str) -> str:
     return (
@@ -830,39 +2243,51 @@ def make_folder_safe(value: str) -> str:
 
 
 def load_simulation_order(simulations_directory: Path):
-    json_path = simulations_directory / "simulation_order.json"
+    json_path = Path(simulations_directory) / "simulation_order.json"
 
     if not json_path.exists():
-        raise FileNotFoundError("No simulation_batch.json found for resume")
+        raise FileNotFoundError("No simulation_order.json found for resume")
 
-    with open(json_path, "r") as f:
-        return json.load(f)
-    
+    with _SIMULATION_ORDER_FILE_LOCK:
+        with json_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+
+def save_simulation_order(simulations_directory: Path, order: dict) -> None:
+    """Atomically persist a complete simulation order."""
+    json_path = Path(simulations_directory) / "simulation_order.json"
+    with _SIMULATION_ORDER_FILE_LOCK:
+        _atomic_write_json(json_path, order)
 
 
 def update_case_status(simulations_directory: Path, folder_name: str, new_status: str):
-    json_path = simulations_directory / "simulation_order.json"
+    """Backward-compatible, concurrency-safe status update helper."""
+    json_path = Path(simulations_directory) / "simulation_order.json"
 
-    with open(json_path, "r") as f:
-        batch = json.load(f)
+    with _SIMULATION_ORDER_FILE_LOCK:
+        with json_path.open("r", encoding="utf-8") as handle:
+            batch = json.load(handle)
 
-    for case in batch["cases"]:
-        if case["folder"] == folder_name:
-            case["status"] = new_status
-            break
+        found = False
+        for case in batch["cases"]:
+            if case["folder"] == folder_name:
+                case["status"] = new_status
+                case["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                found = True
+                break
 
-    with open(json_path, "w") as f:
-        json.dump(batch, f, indent=4)
+        if not found:
+            raise KeyError(f"Unknown simulation case: {folder_name}")
 
+        _atomic_write_json(json_path, batch)
 
 
 def create_simulation_order(args, simulations_directory: Path):
-
+    """Create the durable simulation order including scheduler metadata."""
+    simulations_directory = Path(simulations_directory)
     simulations_directory.mkdir(parents=True, exist_ok=True)
-
     json_path = simulations_directory / "simulation_order.json"
 
-    # Enforce: one order = one directory
     if json_path.exists():
         raise FileExistsError(
             f"Simulation order already exists in this directory:\n"
@@ -871,30 +2296,31 @@ def create_simulation_order(args, simulations_directory: Path):
             f"Create a new directory or use --resume."
         )
 
+    total_cores = int(args.total_cores)
+
     batch = {
-        "acoustic_surface" : args.acoustic_surface,
-        "acoustic_sphere_diameter" : args.acoustic_sphere_diameter,
+        "schema_version": 2,
+        "acoustic_surface": args.acoustic_surface,
+        "acoustic_sphere_diameter": args.acoustic_sphere_diameter,
         "mode": args.mode,
-        "turbulence" : args.turbulence,
+        "turbulence": args.turbulence,
         "meshes": args.meshes,
         "rpms": args.rpms,
-        "cores": args.cores,
+        "total_cores": total_cores,
         "field_init": args.field_init,
-        "mesh_only" : args.mesh_only,
-        "end_on" : args.end_on,
-        "allow_bad_mesh" : args.allow_bad_mesh,
+        "mesh_only": args.mesh_only,
+        "end_on": args.end_on,
+        "allow_bad_mesh": args.allow_bad_mesh,
         "study": args.study,
         "study_file": getattr(args, "study_file", None),
         "study_parameter": getattr(args, "study_parameter", None),
         "study_values": getattr(args, "study_values", None),
-        "cases": []
+        "cases": [],
     }
 
-    # -------- STUDY ON --------
     if args.study:
         mesh = args.meshes[0]
         rpm = args.rpms[0]
-
         study_values = [
             value.strip()
             for value in args.study_values.split("...")
@@ -903,69 +2329,103 @@ def create_simulation_order(args, simulations_directory: Path):
 
         for value in study_values:
             safe_value = make_folder_safe(value)
-
             folder = f"{mesh}_{rpm}RPM_{args.study_parameter}_{safe_value}"
 
-            batch["cases"].append({
-                "folder": folder,
-                "mesh": mesh,
-                "rpm": rpm,
-                "mode": args.mode,
-                "acoustic_surface" : args.acoustic_surface,
-                "acoustic_sphere_diameter" : args.acoustic_sphere_diameter,
-                "turbulence" : args.turbulence,
-                "cores": args.cores,
-                "mesh_only" : args.mesh_only,
-                "end_on" : args.end_on,
-                "allow_bad_mesh" : args.allow_bad_mesh,
-                "field_init": args.field_init,
-                "study": args.study,
-                "study_file": args.study_file,
-                "study_parameter": args.study_parameter,
-                "study_value": value,
-                "status": "pending"
-            })
-
-    # -------- STUDY OFF --------
+            batch["cases"].append(
+                {
+                    "folder": folder,
+                    "mesh": mesh,
+                    "rpm": rpm,
+                    "mode": args.mode,
+                    "acoustic_surface": args.acoustic_surface,
+                    "acoustic_sphere_diameter": args.acoustic_sphere_diameter,
+                    "turbulence": args.turbulence,
+                    "mesh_only": args.mesh_only,
+                    "end_on": args.end_on,
+                    "allow_bad_mesh": args.allow_bad_mesh,
+                    "field_init": args.field_init,
+                    "study": True,
+                    "study_file": args.study_file,
+                    "study_parameter": args.study_parameter,
+                    "study_value": value,
+                    "status": "pending",
+                    "resume_status": None,
+                    "error": None,
+                }
+            )
     else:
         for mesh in args.meshes:
             for rpm in args.rpms:
                 folder = f"{mesh}_{rpm}RPM_{args.mode}"
 
-                batch["cases"].append({
-                    "folder": folder,
-                    "mesh": mesh,
-                    "rpm": rpm,
-                    "mode": args.mode,
-                    "turbulence" : args.turbulence,
-                    "cores": args.cores,
-                    "mesh_only" : args.mesh_only,
-                    "end_on" : args.end_on,
-                    "acoustic_surface" : args.acoustic_surface,
-                    "acoustic_sphere_diameter" : args.acoustic_sphere_diameter,
-                    "allow_bad_mesh" : args.allow_bad_mesh,
-                    "field_init": args.field_init,
-                    "study": args.study,
-                    "study_file": None,
-                    "study_parameter": None,
-                    "study_value": None,
-                    "status": "pending"
-                })
+                batch["cases"].append(
+                    {
+                        "folder": folder,
+                        "mesh": mesh,
+                        "rpm": rpm,
+                        "mode": args.mode,
+                        "turbulence": args.turbulence,
+                        "mesh_only": args.mesh_only,
+                        "end_on": args.end_on,
+                        "acoustic_surface": args.acoustic_surface,
+                        "acoustic_sphere_diameter": args.acoustic_sphere_diameter,
+                        "allow_bad_mesh": args.allow_bad_mesh,
+                        "field_init": args.field_init,
+                        "study": False,
+                        "study_file": None,
+                        "study_parameter": None,
+                        "study_value": None,
+                        "status": "pending",
+                        "resume_status": None,
+                        "error": None,
+                    }
+                )
+
+    add_field_initialization_dependencies(
+        batch["cases"],
+        field_init=args.field_init,
+        study=args.study,
+    )
+
+    layout = calculate_scheduler_layout(
+        cases=batch["cases"],
+        total_cores=total_cores,
+        field_init=args.field_init,
+        study=args.study,
+    )
+
+    batch["cores_per_case"] = layout["cores_per_case"]
+    batch["max_cores_per_case"] = layout["max_cores_per_case"]
+    batch["extra_core_slots"] = layout["extra_core_slots"]
+    batch["max_parallel_cases"] = layout["max_parallel_cases"]
+
+    assign_case_core_allocations(
+        batch["cases"],
+        layout,
+        args.field_init,
+        args.study,
+    )
+
+    with _SIMULATION_ORDER_FILE_LOCK:
+        _atomic_write_json(json_path, batch)
+
+    print(
+        f"Created simulation order file: {json_path}\n"
+        f"Scheduler: total={layout['total_cores']} cores | "
+        f"per-case={layout['cores_per_case']}"
+        f"{('-' + str(layout['max_cores_per_case'])) if layout['max_cores_per_case'] != layout['cores_per_case'] else ''} | "
+        f"max parallel={layout['max_parallel_cases']}"
+    )
 
 
-    with open(json_path, "w") as f:
-        json.dump(batch, f, indent=4)
-
-    print(f"Created simulation order file: {json_path}")
-
-
-def is_mesh_ok(log_path):
+def is_mesh_ok(log_path, quiet=False):
     """
     Returns True if 'Mesh OK' is found in log.checkMesh, else False.
     """
 
     if not log_path.exists():
-        print("Coudn't confirm mesh is OK because of path error...")
+        if not quiet:
+            print("Couldn't confirm mesh is OK because of path error...")
         return False
 
     log_text = log_path.read_text(errors="ignore")
@@ -973,11 +2433,16 @@ def is_mesh_ok(log_path):
     return "Mesh OK" in log_text
 
 
+# ============================================================================
+# CONVERGENCE / LIVE PROGRESS MONITORS
+# ============================================================================
+
 def check_residuals(
     residuals_file,
     revolution_time,
     use_log=True,
     min_points=10,
+    quiet=False,
 ):
     """
     Returns True if all residuals satisfy slope criteria over the last revolution.
@@ -988,6 +2453,13 @@ def check_residuals(
     If use_log=True, the checked quantity is the change in log10(residual)
     over one revolution.
     """
+    import builtins
+
+    def _conditional_print(*args, **kwargs):
+        if not quiet:
+            builtins.print(*args, **kwargs)
+
+    print = _conditional_print
 
     # SETTINGS
     # Bounds are now interpreted as slope/change OVER ONE REVOLUTION
@@ -1132,200 +2604,110 @@ def run_reconstruction_progress_monitor(
     maximum_time=None,
     check_interval=2.0,
     stop_event=None,
+    status_callback=None,
 ):
-    """
-    Display reconstructPar progress on one terminal line.
-
-    Progress is calculated from the number of numeric time directories that
-    exist in the case root compared with the matching directories in
-    processor0. Set maximum_time for a limited resume reconstruction such as
-    reconstructPar -time ":0.05".
-
-    Example:
-        RECONSTRUCT | 42/120 time dirs | 35.00% |
-        latest 0.021000 s | [##########--------------------]
-    """
-
+    """Monitor reconstructPar from filesystem time directories."""
     case_path = Path(main_sim_folder)
-    maximum_time_value = (
-        float(maximum_time)
-        if maximum_time is not None
-        else None
-    )
-
-    previous_print_width = 0
+    maximum_time_value = float(maximum_time) if maximum_time is not None else None
 
     def numeric_times(directory):
         values = set()
         directory = Path(directory)
-
         if not directory.is_dir():
             return values
 
         for path in directory.iterdir():
             if not path.is_dir():
                 continue
-
             try:
                 value = float(path.name)
             except ValueError:
                 continue
-
             if value <= 0.0:
                 continue
-
-            if (
-                maximum_time_value is None
-                or value <= maximum_time_value + 1e-12
-            ):
-                # Rounded keys avoid mismatches such as 0.01 versus 1e-2.
+            if maximum_time_value is None or value <= maximum_time_value + 1e-12:
                 values.add(round(value, 12))
-
         return values
 
     def find_reference_processor():
         processor0 = case_path / "processor0"
-
         if processor0.is_dir():
             return processor0
-
         processor_directories = sorted(
-            path
-            for path in case_path.glob("processor*")
-            if path.is_dir()
+            path for path in case_path.glob("processor*") if path.is_dir()
         )
-
-        return (
-            processor_directories[0]
-            if processor_directories
-            else None
-        )
-
-    def update_status_line(message):
-        nonlocal previous_print_width
-
-        print_width = max(previous_print_width, len(message))
-
-        print(
-            "\r" + message.ljust(print_width),
-            end="",
-            flush=True,
-        )
-
-        previous_print_width = print_width
-
-    def close_status_line(final_message=None):
-        if final_message is not None:
-            update_status_line(final_message)
-
-        if previous_print_width > 0:
-            print(flush=True)
+        return processor_directories[0] if processor_directories else None
 
     try:
         reference_processor = find_reference_processor()
 
         while reference_processor is None:
-            update_status_line(
-                "RECONSTRUCT | Waiting for processor directories..."
+            emit_status(
+                status_callback,
+                stage="reconstructing",
+                detail="waiting for processor directories",
+                progress=0.0,
             )
-
             if stop_event is not None and stop_event.wait(check_interval):
-                close_status_line()
                 return None
-
             if stop_event is None:
                 time.sleep(check_interval)
-
             reference_processor = find_reference_processor()
 
         expected_times = numeric_times(reference_processor)
 
         while not expected_times:
-            limit_text = (
-                f" up to {maximum_time_value:.6f} s"
-                if maximum_time_value is not None
-                else ""
+            emit_status(
+                status_callback,
+                stage="reconstructing",
+                detail="waiting for processor time directories",
+                progress=0.0,
             )
-
-            update_status_line(
-                "RECONSTRUCT | Waiting for processor time directories"
-                f"{limit_text}..."
-            )
-
             if stop_event is not None and stop_event.wait(check_interval):
-                close_status_line()
                 return None
-
             if stop_event is None:
                 time.sleep(check_interval)
-
             expected_times = numeric_times(reference_processor)
 
         expected_count = len(expected_times)
-        bar_width = 30
 
         while True:
-            stopping = (
-                stop_event is not None
-                and stop_event.is_set()
-            )
-
+            stopping = stop_event is not None and stop_event.is_set()
             reconstructed_times = numeric_times(case_path)
-            completed_times = expected_times.intersection(
-                reconstructed_times
-            )
-
+            completed_times = expected_times.intersection(reconstructed_times)
             completed_count = len(completed_times)
-            percentage = min(
-                max(
-                    100.0 * completed_count / expected_count,
-                    0.0,
-                ),
-                100.0,
+            percentage = min(max(100.0 * completed_count / expected_count, 0.0), 100.0)
+            latest_time = max(completed_times) if completed_times else 0.0
+
+            detail = (
+                f"{completed_count}/{expected_count} time dirs | "
+                f"latest {latest_time:.6f} s"
+            )
+            emit_status(
+                status_callback,
+                stage="reconstructing",
+                detail=detail,
+                progress=percentage,
             )
 
-            bar_completed = round(
-                bar_width * percentage / 100.0
-            )
-            progress_bar = (
-                "#" * bar_completed
-                + "-" * (bar_width - bar_completed)
-            )
+            if status_callback is None:
+                print(
+                    f"\rRECONSTRUCT | {detail} | {percentage:6.2f}%",
+                    end="",
+                    flush=True,
+                )
 
-            latest_time = (
-                max(completed_times)
-                if completed_times
-                else 0.0
-            )
+            result = {
+                "completed": completed_count,
+                "expected": expected_count,
+                "percentage": percentage,
+                "latest_time": latest_time,
+            }
 
-            message = (
-                f"RECONSTRUCT | {completed_count}/{expected_count} "
-                f"time dirs | {percentage:6.2f}% | "
-                f"latest {latest_time:.6f} s | "
-                f"[{progress_bar}]"
-            )
-
-            update_status_line(message)
-
-            if completed_count >= expected_count:
-                close_status_line(message)
-                return {
-                    "completed": completed_count,
-                    "expected": expected_count,
-                    "percentage": 100.0,
-                    "latest_time": latest_time,
-                }
-
-            # The reconstruction command has ended. This iteration already
-            # performed the final filesystem scan, so close the dynamic line.
-            if stopping:
-                close_status_line()
-                return {
-                    "completed": completed_count,
-                    "expected": expected_count,
-                    "percentage": percentage,
-                    "latest_time": latest_time,
-                }
+            if completed_count >= expected_count or stopping:
+                if status_callback is None:
+                    print(flush=True)
+                return result
 
             if stop_event is not None:
                 stop_event.wait(check_interval)
@@ -1333,8 +2715,14 @@ def run_reconstruction_progress_monitor(
                 time.sleep(check_interval)
 
     except Exception as error:
-        close_status_line()
-        print(f"Reconstruction progress monitor failed: {error}")
+        emit_status(
+            status_callback,
+            stage="reconstructing",
+            detail=f"progress monitor failed: {error}",
+            error=str(error),
+        )
+        if status_callback is None:
+            print(f"Reconstruction progress monitor failed: {error}")
         return None
 
 
@@ -1344,77 +2732,31 @@ def run_time_progress_monitor(
     check_interval=5.0,
     log_file_name="log.pimpleFoam",
     stop_event=None,
+    status_callback=None,
 ):
-    """
-    Display OpenFOAM physical-time progress on one terminal line.
-
-    Example:
-        PIMPLE | Time 0.042500 / 0.090000 s | 47.22% |
-        [##############----------------]
-
-    The solver log is read incrementally, so the complete file is not scanned
-    again on every update.
-    """
-
+    """Monitor physical-time solver progress by incrementally reading the log."""
     log_path = Path(main_sim_folder) / log_file_name
     end_time = float(end_time)
 
     if end_time <= 0.0:
         raise ValueError("end_time must be greater than zero.")
 
-    # Be tolerant of prefixes, suffixes, and additional whitespace in
-    # OpenFOAM or MPI output lines.
-    time_pattern = re.compile(
-        rf"\bTime\s*=\s*({_OPENFOAM_NUMBER})"
-    )
-
+    time_pattern = re.compile(rf"\bTime\s*=\s*({_OPENFOAM_NUMBER})")
     latest_time = 0.0
     file_position = 0
     unfinished_line = ""
-    previous_print_width = 0
-
-    def update_status_line(message):
-        nonlocal previous_print_width
-
-        # Padding removes characters left by a previously longer message.
-        print_width = max(previous_print_width, len(message))
-
-        print(
-            "\r" + message.ljust(print_width),
-            end="",
-            flush=True,
-        )
-
-        previous_print_width = print_width
-
-    def close_status_line(final_message=None):
-        if final_message is not None:
-            update_status_line(final_message)
-
-        # Finish the dynamic line so following print() calls start normally.
-        if previous_print_width > 0:
-            print(flush=True)
 
     try:
         while True:
-            stopping = (
-                stop_event is not None
-                and stop_event.is_set()
-            )
+            stopping = stop_event is not None and stop_event.is_set()
 
             if log_path.is_file():
                 current_size = log_path.stat().st_size
-
-                # tee truncates the file when a new solver run begins.
                 if current_size < file_position:
                     file_position = 0
                     unfinished_line = ""
 
-                with log_path.open(
-                    "r",
-                    encoding="utf-8",
-                    errors="ignore",
-                ) as log_file:
+                with log_path.open("r", encoding="utf-8", errors="ignore") as log_file:
                     log_file.seek(file_position)
                     new_text = log_file.read()
                     file_position = log_file.tell()
@@ -1422,7 +2764,6 @@ def run_time_progress_monitor(
                 if new_text:
                     combined_text = unfinished_line + new_text
                     lines = combined_text.splitlines(keepends=True)
-
                     if lines and not lines[-1].endswith(("\n", "\r")):
                         unfinished_line = lines.pop()
                     else:
@@ -1430,46 +2771,33 @@ def run_time_progress_monitor(
 
                     for line in lines:
                         match = time_pattern.search(line)
-
                         if match:
                             latest_time = float(match.group(1))
 
-            percentage = min(
-                max(100.0 * latest_time / end_time, 0.0),
-                100.0,
+            percentage = min(max(100.0 * latest_time / end_time, 0.0), 100.0)
+            detail = f"t={latest_time:.6f}/{end_time:.6f} s"
+            emit_status(
+                status_callback,
+                stage="solving",
+                detail=detail if log_path.is_file() else "waiting for solver log",
+                progress=percentage,
             )
 
-            bar_width = 30
-            completed = round(bar_width * percentage / 100.0)
-            progress_bar = (
-                "#" * completed
-                + "-" * (bar_width - completed)
-            )
-
-            if log_path.is_file():
-                message = (
-                    f"PIMPLE | Time {latest_time:.6f} / "
-                    f"{end_time:.6f} s | "
-                    f"{percentage:6.2f}% | "
-                    f"[{progress_bar}]"
+            if status_callback is None:
+                print(
+                    f"\rPIMPLE | {detail} | {percentage:6.2f}%",
+                    end="",
+                    flush=True,
                 )
-            else:
-                message = "PIMPLE | Waiting for solver log..."
-
-            update_status_line(message)
 
             if latest_time >= end_time - 1e-12:
-                close_status_line(
-                    f"PIMPLE | Time {latest_time:.6f} / "
-                    f"{end_time:.6f} s | "
-                    f"100.00% | [{'#' * bar_width}]"
-                )
+                if status_callback is None:
+                    print(flush=True)
                 return latest_time
 
-            # After the solver sets the event, this loop still reads the log
-            # once more before terminating.
             if stopping:
-                close_status_line()
+                if status_callback is None:
+                    print(flush=True)
                 return latest_time
 
             if stop_event is not None:
@@ -1478,8 +2806,14 @@ def run_time_progress_monitor(
                 time.sleep(check_interval)
 
     except Exception as error:
-        close_status_line()
-        print(f"Time-progress monitor failed: {error}")
+        emit_status(
+            status_callback,
+            stage="solving",
+            detail=f"time-progress monitor failed: {error}",
+            error=str(error),
+        )
+        if status_callback is None:
+            print(f"Time-progress monitor failed: {error}")
         return None
 
 
@@ -1492,6 +2826,7 @@ def run_convergence_monitor(
     timestep: str,
     convergence_mode: str = "convergence",
     stop_event=None,
+    status_callback=None,
 ):
     """
     Monitor convergence and stop the OpenFOAM simulation by reducing endTime.
@@ -1504,6 +2839,21 @@ def run_convergence_monitor(
     In all modes, at least one full revolution of data is required before any
     convergence decision is made.
     """
+    import builtins
+
+    def _monitor_print(*args, **kwargs):
+        message = " ".join(str(arg) for arg in args).strip()
+        if status_callback is not None:
+            emit_status(
+                status_callback,
+                stage="solving",
+                detail=message[:120],
+                progress=None,
+            )
+        else:
+            builtins.print(*args, **kwargs)
+
+    print = _monitor_print
 
     convergence_mode = convergence_mode.strip().lower()
 
@@ -1723,7 +3073,7 @@ def run_convergence_monitor(
                     f"Min y+: {min_yplus:.2f}"
                 )
 
-                if check_residuals(residuals_file, rev_time):
+                if check_residuals(residuals_file, rev_time, quiet=status_callback is not None):
                     print(
                         f"\n>>> SUFFICIENT RESIDUAL CONVERGENCE "
                         f"REACHED AT {latest_time}s <<<"
@@ -1856,7 +3206,7 @@ def run_convergence_monitor(
                 # Keep the previous logic: residuals are checked only after
                 # force convergence has first been reached.
                 if force_converged:
-                    if check_residuals(residuals_file, rev_time):
+                    if check_residuals(residuals_file, rev_time, quiet=status_callback is not None):
                         print(
                             f"\n>>> SUFFICIENT FORCE AND RESIDUAL "
                             f"CONVERGENCE REACHED AT {latest_sim_time}s <<<"
@@ -1871,6 +3221,10 @@ def run_convergence_monitor(
 
         if sleep_or_stop():
             return False
+
+# ============================================================================
+# GENERAL CASE / PARAMETER UTILITIES
+# ============================================================================
 
 def get_latest_timestep(case_path):
     case_path = Path(case_path)
@@ -1957,17 +3311,17 @@ def get_safe_timestep(case_dir: Path, required_fields=("U", "p")):
 
     return None
 
-def update_parameter(file_path, target_var, new_value):
+def update_parameter(file_path, target_var, new_value, quiet=False):
     if not os.path.exists(file_path):
-        print(f"Error: {file_path} not found.")
-        return
+        if not quiet:
+            print(f"Error: {file_path} not found.")
+        return False
 
     lines = []
     updated = False
 
-    # Read the file and modify the specific line
-    with open(file_path, 'r') as f:
-        for line in f:
+    with open(file_path, "r") as handle:
+        for line in handle:
             parts = line.split()
             if len(parts) >= 2 and parts[0] == target_var:
                 lines.append(f"{target_var} {new_value};\n")
@@ -1975,14 +3329,48 @@ def update_parameter(file_path, target_var, new_value):
             else:
                 lines.append(line)
 
-    # Write the changes back to the file
     if updated:
-        with open(file_path, 'w') as f:
-            f.writelines(lines)
-        print(f"Successfully updated {target_var} to {new_value}.")
-    else:
-        print(f"Variable '{target_var}' not found in the file.")
+        with open(file_path, "w") as handle:
+            handle.writelines(lines)
 
+        if not quiet:
+            print(f"Successfully updated {target_var} to {new_value}.")
+        return True
+
+    if not quiet:
+        print(f"Variable '{target_var}' not found in the file.")
+    return False
+
+
+def ensure_case_core_configuration(
+    simulation_directory: Path,
+    allocated_cores: int,
+) -> None:
+    """Ensure decomposePar uses the scheduler's core count for this case."""
+    allocated_cores = int(allocated_cores)
+    if allocated_cores < 1:
+        raise ValueError("allocated_cores must be at least 1")
+
+    parameter_file = (
+        Path(simulation_directory)
+        / "Parameters"
+        / "decomposeParDict.cpp"
+    )
+
+    if not parameter_file.is_file():
+        raise FileNotFoundError(
+            f"decomposePar parameter file not found: {parameter_file}"
+        )
+
+    if not update_parameter(
+        parameter_file,
+        "numberOfSubdomains",
+        allocated_cores,
+        quiet=True,
+    ):
+        raise ValueError(
+            f"numberOfSubdomains was not found in {parameter_file}"
+        )
 
 
 
@@ -2046,3 +3434,771 @@ def create_reference_geometry_vtk_series(
         )
 
     return output_directory
+
+
+# ============================================================================
+# SIMULATION REPORT HELPERS
+# ============================================================================
+def create_yplus_distribution_plot(case_path, report_dir, patch_name="cubeWall"):
+    import matplotlib.pyplot as plt
+
+
+    def get_latest_time_dir(case_path):
+        time_dirs = []
+
+        for item in case_path.iterdir():
+            if item.is_dir():
+                try:
+                    time_dirs.append((float(item.name), item))
+                except ValueError:
+                    pass
+
+        if not time_dirs:
+            return None
+
+        return max(time_dirs, key=lambda x: x[0])[1]
+
+    latest_time_dir = get_latest_time_dir(case_path)
+
+    if latest_time_dir is None:
+        return None, None
+
+    yplus_file = latest_time_dir / "yPlus"
+
+    if not yplus_file.exists():
+        return None, None
+
+    text = yplus_file.read_text(encoding="utf-8", errors="ignore")
+
+    patch_pattern = rf"{re.escape(patch_name)}\s*\{{(.*?)\}}"
+    patch_match = re.search(patch_pattern, text, re.DOTALL)
+
+    if not patch_match:
+        return None, None
+
+    patch_block = patch_match.group(1)
+
+    list_pattern = r"nonuniform\s+List<scalar>\s*(\d+)\s*\((.*?)\)"
+    list_match = re.search(list_pattern, patch_block, re.DOTALL)
+
+    if not list_match:
+        return None, None
+
+    values_block = list_match.group(2)
+
+    yplus_values = np.array(
+        [
+            float(v)
+            for v in re.findall(
+                r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?",
+                values_block,
+            )
+        ],
+        dtype=float,
+    )
+
+    if len(yplus_values) == 0:
+        return None, None
+
+    total = len(yplus_values)
+
+    # Compact wall-function quality classes
+    class_counts = [
+        int(np.sum(yplus_values < 5)),
+        int(np.sum((yplus_values >= 5) & (yplus_values <= 30))),
+        int(np.sum(yplus_values > 30)),
+    ]
+    class_percentages = [100.0 * c / total for c in class_counts]
+
+    # Finer block diagram to make the high-y+ region visible
+    block_bins = [0.0, 5.0, 30.0, 50.0, 100.0, 200.0, np.inf]
+    block_labels = ["<5", "5-30", "30-50", "50-100", "100-200", ">200"]
+    block_counts = []
+
+    for lower, upper in zip(block_bins[:-1], block_bins[1:]):
+        if np.isinf(upper):
+            count = np.sum(yplus_values >= lower)
+        elif lower == 0.0:
+            count = np.sum(yplus_values < upper)
+        else:
+            count = np.sum((yplus_values >= lower) & (yplus_values < upper))
+        block_counts.append(int(count))
+
+    block_percentages = [100.0 * c / total for c in block_counts]
+
+    yplus_stats = {
+        "patch_name": patch_name,
+        "time_dir": latest_time_dir.name,
+        "n_faces": int(total),
+        "average_yplus": float(np.mean(yplus_values)),
+        "min_yplus": float(np.min(yplus_values)),
+        "max_yplus": float(np.max(yplus_values)),
+        "median_yplus": float(np.median(yplus_values)),
+        "share_yplus_lt_5_percent": class_percentages[0],
+        "share_yplus_5_to_30_percent": class_percentages[1],
+        "share_yplus_gt_30_percent": class_percentages[2],
+    }
+
+    yplus_plot = report_dir / "yplus_distribution.png"
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.4))
+    bars = ax.bar(block_labels, block_percentages, zorder=3)
+
+    ax.set_ylabel("Surface face share [%]")
+    ax.set_xlabel("y+ interval")
+    ax.set_title(
+        f"y+ Distribution of Propeller Surface "
+        f"(avg. y+ = {yplus_stats['average_yplus']:.1f})"
+    )
+
+    ax.grid(axis="y", zorder=0)
+    ax.set_axisbelow(True)
+
+    # Extra vertical space prevents labels from touching the top frame or gridlines.
+    max_percentage = max(block_percentages)
+    ax.set_ylim(0, max_percentage * 1.18 + 3)
+
+    # Labels are shifted above each bar and placed on a white background,
+    # so the grid does not reduce readability.
+    for bar, percentage, count in zip(bars, block_percentages, block_counts):
+        label_y = bar.get_height() + 1.5
+
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            label_y,
+            f"{percentage:.1f}%\n({count})",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            bbox=dict(
+                facecolor="white",
+                edgecolor="none",
+                alpha=0.9,
+                pad=1.5,
+            ),
+            clip_on=False,
+            zorder=5,
+        )
+
+    note = (
+        f"Classes: <5 = {class_percentages[0]:.1f}%, "
+        f"5-30 = {class_percentages[1]:.1f}%, "
+        f">30 = {class_percentages[2]:.1f}%"
+    )
+    fig.text(0.5, 0.015, note, ha="center", fontsize=9)
+
+    fig.tight_layout(rect=(0, 0.07, 1, 0.96))
+    fig.savefig(yplus_plot, dpi=200)
+    plt.close(fig)
+
+    return yplus_plot, yplus_stats
+
+
+def read_mesh_element_types(case_path):
+    log_checkmesh = case_path / "log.checkMesh"
+
+    element_types = {
+        "hexahedra": 0,
+        "prisms": 0,
+        "wedges": 0,
+        "pyramids": 0,
+        "tet wedges": 0,
+        "tetrahedra": 0,
+        "polyhedra": 0,
+    }
+
+    if not log_checkmesh.exists():
+        return element_types
+
+    text = log_checkmesh.read_text(encoding="utf-8", errors="ignore")
+
+    patterns = {
+        "hexahedra": r"hexahedra:\s*([0-9]+)",
+        "prisms": r"prisms:\s*([0-9]+)",
+        "wedges": r"wedges:\s*([0-9]+)",
+        "pyramids": r"pyramids:\s*([0-9]+)",
+        "tet wedges": r"tet wedges:\s*([0-9]+)",
+        "tetrahedra": r"tetrahedra:\s*([0-9]+)",
+        "polyhedra": r"polyhedra:\s*([0-9]+)",
+    }
+
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            element_types[key] = int(match.group(1))
+
+    return element_types
+
+
+def create_mesh_element_plot(element_types, report_dir):
+    import matplotlib.pyplot as plt
+
+    nonzero = {
+        key: value
+        for key, value in element_types.items()
+        if value > 0
+    }
+
+    if not nonzero:
+        return None
+
+    total = sum(nonzero.values())
+
+    labels = list(nonzero.keys())
+    values = [100.0 * value / total for value in nonzero.values()]
+
+    mesh_plot = report_dir / "mesh_element_types.png"
+
+    plt.figure(figsize=(5.0, 3.4))
+    bars = plt.bar(labels, values)
+
+    plt.ylabel("Cell share [%]")
+    plt.title("Mesh Element Types")
+    plt.xticks(rotation=30, ha="right")
+    plt.grid(axis="y")
+
+    # --- Add percentage labels on bars ---
+    for bar, val in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{val:.1f}%",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    plt.tight_layout()
+    plt.savefig(mesh_plot, dpi=200)
+    plt.close()
+
+    return mesh_plot
+
+
+def read_mesh_information(case_path):
+    log_checkmesh = case_path / "log.checkMesh"
+
+    mesh_info = {
+        "mesh_ok": False,
+        "cells": None,
+        "faces": None,
+        "points": None,
+        "boundary_patches": None,
+        "max_aspect_ratio": None,
+        "max_skewness": None,
+        "max_non_orthogonality": None,
+    }
+
+    if not log_checkmesh.exists():
+        mesh_info["status"] = "log.checkMesh not found"
+        return mesh_info
+
+    text = log_checkmesh.read_text(encoding="utf-8", errors="ignore")
+
+    mesh_info["mesh_ok"] = "Mesh OK" in text
+    mesh_info["status"] = "Mesh OK" if mesh_info["mesh_ok"] else "Mesh check failed / not confirmed"
+
+    patterns = {
+        "points": r"points:\s*([0-9]+)",
+        "faces": r"faces:\s*([0-9]+)",
+        "cells": r"cells:\s*([0-9]+)",
+        "boundary_patches": r"boundary patches:\s*([0-9]+)",
+        "max_aspect_ratio": r"Max aspect ratio\s*=\s*([0-9.eE+-]+)",
+        "max_skewness": r"Max skewness\s*=\s*([0-9.eE+-]+)",
+        "max_non_orthogonality": r"Mesh non-orthogonality Max:\s*([0-9.eE+-]+)",
+    }
+
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1)
+            try:
+                mesh_info[key] = float(value) if "." in value or "e" in value.lower() else int(value)
+            except ValueError:
+                mesh_info[key] = value
+
+    return mesh_info
+
+
+def format_seconds(seconds):
+    if seconds is None:
+        return "Not found"
+
+    seconds = int(round(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+
+    if h > 0:
+        return f"{h} h {m} min {s} s"
+    if m > 0:
+        return f"{m} min {s} s"
+    return f"{s} s"
+
+
+def format_optional_number(value, format_spec=".6e"):
+    if value is None:
+        return "Not found"
+
+    try:
+        return format(float(value), format_spec)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def format_optional_bool(value):
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "Not found"
+
+
+def evaluate_thrust_convergence(times, thrusts, rev_time, threshold=1e-3):
+    latest_time = float(times[-1])
+    last_rev_start = latest_time - rev_time
+    idx_start = np.searchsorted(times, last_rev_start, side="left")
+
+    window_times = times[idx_start:]
+    window_thrusts = thrusts[idx_start:]
+
+    if len(window_thrusts) == 0:
+        return {
+            "passed": False,
+            "reason": "No thrust samples found in final revolution window.",
+            "window_start_s": last_rev_start,
+            "window_end_s": latest_time,
+            "mean_N": None,
+            "std_N": None,
+            "relative_std": None,
+            "threshold": threshold,
+            "n_samples": 0,
+        }
+
+    mean_thrust = float(np.mean(window_thrusts))
+    std_thrust = float(np.std(window_thrusts, ddof=0))
+    relative_std = std_thrust / max(abs(mean_thrust), 1e-12)
+
+    return {
+        "passed": bool(relative_std < threshold),
+        "reason": None,
+        "window_start_s": float(window_times[0]),
+        "window_end_s": latest_time,
+        "mean_N": mean_thrust,
+        "std_N": std_thrust,
+        "relative_std": float(relative_std),
+        "threshold": float(threshold),
+        "n_samples": int(len(window_thrusts)),
+    }
+
+
+def evaluate_moments(times, moments, rev_time):
+    latest_time = float(times[-1])
+    last_rev_start = latest_time - rev_time
+    idx_start = np.searchsorted(times, last_rev_start, side="left")
+
+    window_times = times[idx_start:]
+    window_moments = moments[idx_start:]
+
+    if len(window_moments) == 0:
+        return {
+            "passed": False,
+            "reason": "No moments samples found in final revolution window.",
+            "window_start_s": last_rev_start,
+            "window_end_s": latest_time,
+            "mean_N": None,
+            "std_N": None,
+            "relative_std": None
+        }
+
+    mean_moment = float(np.mean(window_moments))
+    std_moment = float(np.std(window_moments, ddof=0))
+    relative_std = std_moment / max(abs(mean_moment), 1e-12)
+
+    return {
+        "passed": bool,
+        "reason": None,
+        "window_start_s": float(window_times[0]),
+        "window_end_s": latest_time,
+        "mean_N": mean_moment,
+        "std_N": std_moment,
+        "relative_std": float(relative_std)
+    }
+
+
+def compute_thrust_stability_history(times, thrusts, rev_time):
+    """
+    Computes the relative thrust fluctuation over a sliding one-revolution window.
+
+    metric(t) = std(F_window) / |mean(F_window)|
+
+    The value at time t uses all force samples within [t - T_rev, t].
+    """
+    metric = np.full(len(times), np.nan, dtype=float)
+    window_mean = np.full(len(times), np.nan, dtype=float)
+    window_std = np.full(len(times), np.nan, dtype=float)
+    sample_count = np.zeros(len(times), dtype=int)
+
+    for i, time_value in enumerate(times):
+        window_start = time_value - rev_time
+
+        if window_start < times[0]:
+            continue
+
+        j = np.searchsorted(times, window_start, side="left")
+        window_values = thrusts[j : i + 1]
+
+        if len(window_values) < 2:
+            continue
+
+        mean_value = float(np.mean(window_values))
+        std_value = float(np.std(window_values, ddof=0))
+
+        window_mean[i] = mean_value
+        window_std[i] = std_value
+        metric[i] = std_value / max(abs(mean_value), 1e-12)
+        sample_count[i] = int(len(window_values))
+
+    return {
+        "time": times,
+        "relative_std": metric,
+        "mean_N": window_mean,
+        "std_N": window_std,
+        "sample_count": sample_count,
+    }
+
+
+def create_force_plots(times, thrusts, report_dir, rev_time, thrust_convergence):
+    import matplotlib.pyplot as plt
+
+    force_plot = report_dir / "force_plot.png"
+    conv_plot = report_dir / "force_convergence.png"
+
+    latest_time = float(times[-1])
+    last_rev_start = latest_time - rev_time
+
+    # -----------------------------
+    # Force history plot
+    # -----------------------------
+    # The raw force plot is kept as a general overview. Extreme initialization
+    # spikes are excluded only from the axis scaling, not from the data itself.
+    plot_mask = times > 0.001
+    plot_thrusts = thrusts[plot_mask]
+
+    if len(plot_thrusts) > 0:
+        y_min = np.percentile(plot_thrusts, 1)
+        y_max = np.percentile(plot_thrusts, 99)
+        y_margin = 0.15 * max(y_max - y_min, 1e-12)
+    else:
+        y_min, y_max = np.min(thrusts), np.max(thrusts)
+        y_margin = 0.15 * max(y_max - y_min, 1e-12)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(times, thrusts, label="Pressure force Fz")
+
+    plt.axvspan(
+        last_rev_start,
+        latest_time,
+        alpha=0.2,
+        label="final revolution window",
+    )
+
+    plt.ylim(y_min - y_margin, y_max + y_margin)
+    plt.xlabel("Time [s]")
+    plt.ylabel("Force Fz [N]")
+    plt.title("Pressure Force Fz")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(force_plot, dpi=200)
+    plt.close()
+
+    # -----------------------------
+    # Thrust stability metric plot
+    # -----------------------------
+    # This plot directly visualizes the implemented convergence criterion:
+    # std(F) / |mean(F)| evaluated over a sliding one-revolution window.
+    threshold = thrust_convergence["threshold"]
+    status = "PASSED" if thrust_convergence["passed"] else "FAILED"
+    final_relative_std = thrust_convergence["relative_std"]
+
+    stability_history = compute_thrust_stability_history(times, thrusts, rev_time)
+    metric_time = stability_history["time"]
+    metric = stability_history["relative_std"]
+    valid = np.isfinite(metric) & (metric > 0.0)
+
+    plt.figure(figsize=(12, 5))
+
+    if np.any(valid):
+        plt.plot(
+            metric_time[valid],
+            metric[valid],
+            label=r"sliding 1-rev $\sigma_F / |\overline{F}|$",
+        )
+
+    plt.axhline(
+        threshold,
+        linestyle="--",
+        label=f"criterion = {threshold:g}",
+    )
+
+    plt.axvspan(
+        last_rev_start,
+        latest_time,
+        alpha=0.2,
+        label="final evaluation window",
+    )
+
+    if final_relative_std is not None:
+        text = (
+            f"Final 1-rev result: {final_relative_std:.3e} → {status}\n"
+            f"Criterion: relative thrust fluctuation < {threshold:g}"
+        )
+    else:
+        text = f"Final 1-rev result could not be evaluated → {status}"
+
+    plt.text(
+        0.02,
+        0.95,
+        text,
+        transform=plt.gca().transAxes,
+        ha="left",
+        va="top",
+        bbox=dict(facecolor="white", edgecolor="black", alpha=0.85),
+    )
+
+    plt.yscale("log")
+    plt.xlabel("Time [s]")
+    plt.ylabel(r"Relative thrust fluctuation $\sigma_F / |\overline{F}|$")
+    plt.title("Thrust Stability Criterion over Sliding One-Revolution Window")
+    plt.grid(True, which="both")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(conv_plot, dpi=200)
+    plt.close()
+
+    return force_plot, conv_plot, stability_history
+
+
+def create_moments_plots(times, moments, report_dir, rev_time):
+    import matplotlib.pyplot as plt
+
+    moments_plot = report_dir / "moments_plot.png"
+
+    latest_time = float(times[-1])
+    last_rev_start = latest_time - rev_time
+
+    # -----------------------------
+    # Moments history plot
+    # -----------------------------
+
+    plot_mask = times > 0.001
+    plot_moments = moments[plot_mask]
+
+    if len(plot_moments) > 0:
+        y_min = np.percentile(plot_moments, 1)
+        y_max = np.percentile(plot_moments, 99)
+        y_margin = 0.15 * max(y_max - y_min, 1e-12)
+    else:
+        y_min, y_max = np.min(moments), np.max(moments)
+        y_margin = 0.15 * max(y_max - y_min, 1e-12)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(times, moments, label="Moments (pressure & viscous) M_y")
+
+    plt.axvspan(
+        last_rev_start,
+        latest_time,
+        alpha=0.2,
+        label="final revolution window",
+    )
+
+    plt.ylim(y_min - y_margin, y_max + y_margin)
+    plt.xlabel("Time [s]")
+    plt.ylabel("Moment My [Nm]")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(moments_plot, dpi=200)
+    plt.close()
+
+    return moments_plot
+
+
+def read_residual_dataframe(residual_file):
+    if not residual_file.exists():
+        return None
+
+    with open(residual_file, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    if len(lines) < 3:
+        return None
+
+    header = lines[1].lstrip("#").split()
+
+    df = pd.read_csv(
+        residual_file,
+        sep=r"\s+",
+        names=header,
+        skiprows=2,
+        engine="python",
+    )
+
+    if "Time" not in df.columns:
+        return None
+
+    df = df.apply(pd.to_numeric, errors="coerce")
+    df = df.dropna(subset=["Time"])
+    df = df.sort_values("Time")
+
+    return df
+
+
+def evaluate_residual_slopes(df, rev_time, latest_time):
+    if df is None or len(df) == 0:
+        return None
+
+    last_rev_start = latest_time - rev_time
+    window = df[(df["Time"] >= last_rev_start) & (df["Time"] <= latest_time)].copy()
+
+    if len(window) < 2:
+        return {
+            "window_start_s": last_rev_start,
+            "window_end_s": latest_time,
+            "n_samples": int(len(window)),
+            "slopes_per_rev": {},
+            "end_residuals": {},
+            "mean_residuals": {},
+            "reason": "Not enough residual samples in final revolution window.",
+        }
+
+    # Independent variable in revolutions relative to the start of the final window.
+    x_rev = (window["Time"].to_numpy(dtype=float) - last_rev_start) / rev_time
+
+    slopes_per_rev = {}
+    end_residuals = {}
+    mean_residuals = {}
+
+    for col in window.columns:
+        if col == "Time":
+            continue
+
+        values = window[col].to_numpy(dtype=float)
+        valid = np.isfinite(values) & (values > 0.0) & np.isfinite(x_rev)
+
+        if np.count_nonzero(valid) < 2:
+            slopes_per_rev[col] = None
+            end_residuals[col] = None
+            mean_residuals[col] = None
+            continue
+
+        y_log = np.log10(values[valid])
+        x_valid = x_rev[valid]
+
+        # Slope of log10(residual) per propeller revolution.
+        slope, _intercept = np.polyfit(x_valid, y_log, 1)
+
+        slopes_per_rev[col] = float(slope)
+        end_residuals[col] = float(values[valid][-1])
+        mean_residuals[col] = float(np.mean(values[valid]))
+
+    return {
+        "window_start_s": float(window["Time"].iloc[0]),
+        "window_end_s": float(window["Time"].iloc[-1]),
+        "n_samples": int(len(window)),
+        "slopes_per_rev": slopes_per_rev,
+        "end_residuals": end_residuals,
+        "mean_residuals": mean_residuals,
+        "reason": None,
+    }
+
+
+def create_residual_plots(residual_file, report_dir, rev_time, latest_time):
+    import matplotlib.pyplot as plt
+
+    residual_plot = report_dir / "residuals.png"
+
+    df = read_residual_dataframe(residual_file)
+
+    if df is None:
+        return None, None
+
+    last_rev_start = latest_time - rev_time
+
+    plt.figure(figsize=(12, 5))
+
+    for col in df.columns:
+        if col != "Time":
+            plt.plot(df["Time"], df[col], label=col)
+
+    plt.axvspan(
+        last_rev_start,
+        latest_time,
+        alpha=0.2,
+        label="final revolution window",
+    )
+
+    plt.yscale("log")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Residual")
+    plt.title("Residual Convergence")
+    plt.grid(True, which="both")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(residual_plot, dpi=200)
+    plt.close()
+
+    residual_slope_info = evaluate_residual_slopes(df, rev_time, latest_time)
+
+    return residual_plot, residual_slope_info
+
+
+def draw_courant_summary(c, title, summary, y_position):
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y_position, title)
+    y_position -= 20
+
+    c.setFont("Helvetica", 10)
+
+    if summary is None:
+        c.drawString(50, y_position, "No matching entries found in solver log.")
+        return y_position - 26
+
+    c.drawString(
+        50,
+        y_position,
+        f"Samples: {summary['samples']} | "
+        "Logged mean Co, average / maximum: "
+        f"{format_optional_number(summary['mean_co_average'], '.4g')} / "
+        f"{format_optional_number(summary['mean_co_max'], '.4g')}",
+    )
+    y_position -= 18
+
+    c.drawString(
+        50,
+        y_position,
+        "Logged maximum Co, average / peak: "
+        f"{format_optional_number(summary['max_co_average'], '.4g')} / "
+        f"{format_optional_number(summary['peak_max_co'], '.4g')}",
+    )
+    y_position -= 18
+
+    exceedance_count = summary[
+        "configured_max_co_exceedance_count"
+    ]
+    exceedance_percent = summary[
+        "configured_max_co_exceedance_percent"
+    ]
+
+    if exceedance_count is not None:
+        c.drawString(
+            50,
+            y_position,
+            "Samples above configured maxCo: "
+            f"{exceedance_count} "
+            f"({format_optional_number(exceedance_percent, '.2f')}%)",
+        )
+        y_position -= 18
+
+    return y_position - 18

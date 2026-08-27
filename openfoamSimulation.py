@@ -1,23 +1,23 @@
 import os
-import docker
+import threading
 from pathlib import Path
 
-import threading
+import docker
 
+from tools import _run_reconstruction_with_progress
+from tools import ensure_case_core_configuration
+from tools import remove_stale_stopped_container
+from tools import report_case_stage
+from tools import run_openfoam_command
+from tools import get_safe_timestep
+from tools import is_mesh_ok
+from tools import processor_deletion_is_safe
+from tools import read_openfoam_scalar
+from tools import reconstructed_history_is_complete
 from tools import run_convergence_monitor
 from tools import run_time_progress_monitor
-from tools import run_reconstruction_progress_monitor
-from tools import read_openfoam_scalar
-from tools import is_mesh_ok
-from tools import get_safe_timestep
-from tools import processor_deletion_is_safe
 from tools import safe_exec
-from tools import _numeric_time_directories
-from tools import reconstructed_history_is_complete
-from tools import _run_reconstruction_with_progress
 
-
-convergence_check_interval = 1
 
 def openfoamSimulation(
     simulation_name,
@@ -34,17 +34,39 @@ def openfoamSimulation(
     ALLOW_BAD_MESH,
     initialize_from_previous=False,
     previous_simulation_path=None,
+    STATUS_CALLBACK=None,
 ):
+    """
+    Run one complete OpenFOAM case inside its own Docker container.
+
+    NUMBER_OF_CORES == 1 uses a true serial OpenFOAM path. Two or more cores use
+    the existing decomposed MPI path.
+    """
+    convergence_check_interval = 1
+
     status = False
     container = None
     monitor_thread = None
     monitor_stop_event = None
 
+    simulation_working_directory = Path(simulation_working_directory)
+    number_of_cores = int(NUMBER_OF_CORES)
+    parallel_run = number_of_cores > 1
+
+    if number_of_cores < 1:
+        raise ValueError("NUMBER_OF_CORES must be at least 1")
+
     try:
+        # The scheduler is the single source of truth for MPI decomposition.
+        # Re-assert it here as well so resumed / migrated cases cannot launch
+        # with a stale numberOfSubdomains value.
+        ensure_case_core_configuration(
+            simulation_working_directory,
+            number_of_cores,
+        )
+
         client = docker.from_env()
-
-        simulation_working_directory = Path(simulation_working_directory)
-
+        remove_stale_stopped_container(client, simulation_name, STATUS_CALLBACK)
 
         my_volumes = {
             str(simulation_working_directory): {
@@ -53,14 +75,16 @@ def openfoamSimulation(
             },
         }
 
-        # On Linux, run the container with the host user's UID/GID so files
-        # created in bind-mounted case directories are owned by the user
-        # instead of root. On Windows, keep Docker's default user behavior.
         docker_user = None
         if hasattr(os, "getuid") and hasattr(os, "getgid"):
             docker_user = f"{os.getuid()}:{os.getgid()}"
 
-        print(f"Docker user: {docker_user or 'default'}")
+        report_case_stage(
+            STATUS_CALLBACK,
+            "docker",
+            f"creating container | cores={number_of_cores} | "
+            f"mode={'MPI' if parallel_run else 'serial'}",
+        )
 
         container = client.containers.run(
             image="microfluidica/openfoam:13",
@@ -72,326 +96,296 @@ def openfoamSimulation(
             tty=True,
             stdin_open=True,
             user=docker_user,
+            labels={"acoustic-pipeline-case": simulation_name},
         )
 
-        print(f"Container '{container.name}' created successfully!")
-        print(f"Status: {container.status}")
-
-        # ---------------- NOT RESUME ----------------
+        # ------------------------------------------------------------------
+        # NEW CASE: mesh preparation
+        # ------------------------------------------------------------------
         if not resume:
-
-            case_separator = f"_{rpm_count}RPM_"
-            mesh_name, separator_found, _ = simulation_name.partition(case_separator)
-
-            if not separator_found or not mesh_name:
-                raise ValueError(
-                    f"Could not extract mesh name from simulation name "
-                    f"'{simulation_name}'. Expected '{case_separator}'."
-                )
-
-            mesh_file_string = f"{mesh_name}.msh"
-
-            blockMesh_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && blockMesh > log.blockMesh'"
-            print("blockMesh started...")
-            if not safe_exec(container, blockMesh_cmd, "blockMesh"):
-                return False
-            print("blockMesh finished...")
-
-
-            surfaceFeatures_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && surfaceFeatures > log.surfaceFeatures'"
-            print("surfaceFeatures started...")
-            if not safe_exec(container, surfaceFeatures_cmd, "surfaceFeatures"):
-                return False
-            print("surfaceFeatures finished...")
-
-            decomposePar_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && decomposePar -copyZero > log.decomposePar'"
-            print("decomposePar started...")
-            if not safe_exec(container, decomposePar_cmd, "decomposePar"):
-                return False
-            print("decomposePar finished...")
-
-            snappyHexMesh_cmd = (
-                "bash -c '"
-                "set -o pipefail; "
-                "source /opt/openfoam13/etc/bashrc && "
-                f"mpirun --allow-run-as-root --use-hwthread-cpus "
-                f"-np {NUMBER_OF_CORES} "
-                "snappyHexMesh -parallel -overwrite "
-                "2>&1 | tee log.snappyHexMesh"
-                "'"
-            )
-            print("snappyHexMesh started...")
-            if not safe_exec(container, snappyHexMesh_cmd, "snappyHexMesh"):
-                return False
-            print("snappyHexMesh finished...")
-
-            """
-            ideasUnv_cmd = (
-                'bash -c "'
-                "source /opt/openfoam13/etc/bashrc && "
-                'fluentMeshToFoam -case /simulation '
-                f'"/source_meshes/{mesh_file_string}"'
-                '"'
-            )
-            
-            print("ideasUnvToFoam started...")
-            if not safe_exec(
-                container,
-                ideasUnv_cmd,
-                "ideasUnvToFoam",
-                print_output=True,
-            ):
-                return False
-
-            print("ideasUnvToFoam finished...")
-
-            transformPoints_cmd = (
+            block_mesh_cmd = (
                 "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                "transformPoints \"scale=(0.001 0.001 0.001)\" "
-                "| tee log.transformPoints'"
+                "blockMesh > log.blockMesh 2>&1'"
             )
-
-            print("Scaling mesh from millimetres to metres...")
-            if not safe_exec(
+            if not run_openfoam_command(
                 container,
-                transformPoints_cmd,
-                "transformPoints",
-                print_output=True,
+                block_mesh_cmd,
+                "blockMesh",
+                STATUS_CALLBACK,
+                "blockMesh",
             ):
                 return False
 
-            print("Mesh scaling finished...")
-
-            
-            set_wall_patch_cmd = (
-            "bash -c '"
-            "set -o pipefail; "
-            "source /opt/openfoam13/etc/bashrc && "
-            "foamDictionary constant/polyMesh/boundary "
-            "-entry entry0/cubeWall/type "
-            "-set wall "
-            "2>&1 | tee log.setPatchTypes"
-            "'"
+            surface_features_cmd = (
+                "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                "surfaceFeatures > log.surfaceFeatures 2>&1'"
             )
-
-            print("Setting OpenFOAM patch types...")
-            if not safe_exec(
+            if not run_openfoam_command(
                 container,
-                set_wall_patch_cmd,
-                "set cubeWall patch type",
-                print_output=True,
+                surface_features_cmd,
+                "surfaceFeatures",
+                STATUS_CALLBACK,
+                "surfaceFeatures",
             ):
                 return False
-            print("Patch types configured.")
 
-            
-
-            toposet_cmd = (
-             "bash -c 'source /opt/openfoam13/etc/bashrc && splitMeshRegions -makeCellZones -noFields | tee log.splitMeshRegions'"
-            )
-
-            print("TopoSet started...")
-            if not safe_exec(
-                container,
-                toposet_cmd,
-                "topoSet",
-                print_output=True,
-            ):
-                return False
-            print("toposet finished...")
-            """
-
-
-            
-            checkMesh_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && checkMesh -allGeometry -allTopology -writeSets -setFormat vtk | tee log.checkMesh'"
-            print("checkMesh started...")
-            if not safe_exec(container, checkMesh_cmd, "checkMesh", print_output=True):
-                return False
-            print("checkMesh finished...")
-            
-            
-
-
-            vtk_cell_sets_cmd = (
-            "bash -c 'source /opt/openfoam13/etc/bashrc && "
-            "for cell_set in "
-            "underdeterminedCells "
-            "oneInternalFaceCells "
-            "twoInternalFacesCells; do "
-            "if [ -f constant/polyMesh/sets/$cell_set ]; then "
-            "echo \"Converting $cell_set to VTK...\"; "
-            "foamToVTK -constant -cellSet $cell_set; "
-            "else "
-            "echo \"WARNING: constant/polyMesh/sets/$cell_set not found\"; "
-            "fi; "
-            "done'"
-            )
-
-            print("Converting problematic cell sets to VTK...")
-            if not safe_exec(
-                container,
-                vtk_cell_sets_cmd,
-                "foamToVTK cell-set conversion",
-                print_output=True,
-            ):
-                return False
-            print("Cell-set VTK conversion finished.")
-            
-            checkMesh_log_path = Path(simulation_working_directory) / "log.checkMesh"
-
-            if not (is_mesh_ok(checkMesh_log_path) or ALLOW_BAD_MESH):
-                print("Mesh is not OK... stopping this case")
-                return False
-
-            if MODE == "AMI":
-
-
-                createNonConformalCouples_cmd = (
+            if parallel_run:
+                decompose_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    f"mpirun --oversubscribe -np {NUMBER_OF_CORES} "
-                    "createNonConformalCouples -parallel rotaryRegion_slave rotaryRegion"
-                    "> log.createNonConformalCouples 2>&1'"
+                    "decomposePar -copyZero > log.decomposePar 2>&1'"
                 )
-
-                print("createNonConformalCouples started...")
-
-                if not safe_exec(
+                if not run_openfoam_command(
                     container,
-                    createNonConformalCouples_cmd,
-                    "createNonConformalCouples"
+                    decompose_cmd,
+                    "decomposePar",
+                    STATUS_CALLBACK,
+                    "decomposePar",
                 ):
                     return False
 
-                print("createNonConformalCouples finished...")
+                snappy_cmd = (
+                    "bash -c '"
+                    "set -o pipefail; "
+                    "source /opt/openfoam13/etc/bashrc && "
+                    f"mpirun --allow-run-as-root --use-hwthread-cpus -np {number_of_cores} "
+                    "snappyHexMesh -parallel -overwrite "
+                    "2>&1 | tee log.snappyHexMesh'"
+                )
+            else:
+                snappy_cmd = (
+                    "bash -c '"
+                    "set -o pipefail; "
+                    "source /opt/openfoam13/etc/bashrc && "
+                    "snappyHexMesh -overwrite 2>&1 | tee log.snappyHexMesh'"
+                )
+
+            if not run_openfoam_command(
+                container,
+                snappy_cmd,
+                "snappyHexMesh",
+                STATUS_CALLBACK,
+                "snappyHexMesh",
+            ):
+                return False
+
+            check_mesh_cmd = (
+                "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                "checkMesh -allGeometry -allTopology -writeSets -setFormat vtk "
+                "| tee log.checkMesh'"
+            )
+            if not run_openfoam_command(
+                container,
+                check_mesh_cmd,
+                "checkMesh",
+                STATUS_CALLBACK,
+                "checkMesh",
+            ):
+                return False
+
+            vtk_cell_sets_cmd = (
+                "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                "for cell_set in underdeterminedCells oneInternalFaceCells "
+                "twoInternalFacesCells; do "
+                "if [ -f constant/polyMesh/sets/$cell_set ]; then "
+                "foamToVTK -constant -cellSet $cell_set; "
+                "fi; "
+                "done'"
+            )
+            if not run_openfoam_command(
+                container,
+                vtk_cell_sets_cmd,
+                "foamToVTK cell-set conversion",
+                STATUS_CALLBACK,
+                "meshDiagnostics",
+            ):
+                return False
+
+            check_mesh_log_path = simulation_working_directory / "log.checkMesh"
+            if not (is_mesh_ok(check_mesh_log_path, quiet=True) or ALLOW_BAD_MESH):
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "checkMesh",
+                    "mesh check failed and --allow-bad-mesh is not set",
+                    error="Mesh is not OK",
+                )
+                return False
+
+            if MODE == "AMI":
+                if parallel_run:
+                    ncc_cmd = (
+                        "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                        f"mpirun --oversubscribe -np {number_of_cores} "
+                        "createNonConformalCouples -parallel "
+                        "rotaryRegion_slave rotaryRegion "
+                        "> log.createNonConformalCouples 2>&1'"
+                    )
+                else:
+                    ncc_cmd = (
+                        "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                        "createNonConformalCouples rotaryRegion_slave rotaryRegion "
+                        "> log.createNonConformalCouples 2>&1'"
+                    )
+
+                if not run_openfoam_command(
+                    container,
+                    ncc_cmd,
+                    "createNonConformalCouples",
+                    STATUS_CALLBACK,
+                    "createNonConformalCouples",
+                ):
+                    return False
 
             if initialize_from_previous:
-                print(f"Initializing from previous case: {previous_simulation_path}")
+                if previous_simulation_path is None:
+                    raise ValueError(
+                        "initialize_from_previous=True but no previous simulation path was supplied"
+                    )
 
-                mapFields_cmd = (
+                map_fields_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
                     "mapFields /simulation/init/ -consistent -sourceTime latestTime "
-                    "> log.mapFields'"
+                    "> log.mapFields 2>&1'"
                 )
-                print("mapFields started...")
-                if not safe_exec(container, mapFields_cmd, "mapFields"):
+                if not run_openfoam_command(
+                    container,
+                    map_fields_cmd,
+                    "mapFields",
+                    STATUS_CALLBACK,
+                    "mapFields",
+                    detail=f"initializing from {Path(previous_simulation_path).name}",
+                ):
                     return False
-                print("mapFields finished...")
 
-            #if not MESH_ONLY:
-            # ---------------- RESUME ----------------
+        # ------------------------------------------------------------------
+        # RESUME CASE
+        # ------------------------------------------------------------------
         else:
-            print("Preparing to resume...")
-
-            safe_time = get_safe_timestep(Path(simulation_working_directory))
+            report_case_stage(STATUS_CALLBACK, "resume", "finding safe timestep")
+            safe_time = get_safe_timestep(simulation_working_directory)
 
             if safe_time is None:
-                print("No safe timestep found for resume.")
-                return False
-
-            # Reconstruct every decomposed result from the first written time
-            # through the selected safe time. Do not use reconstructPar -rm here:
-            # processor folders must remain available until all checks pass.
-            reconstruct_time_range = f":{safe_time}"
-            reconstructPar_resume_cmd = (
-                "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                f'reconstructPar -time "{reconstruct_time_range}" -noZero '
-                "> log_resume.reconstructPar 2>&1'"
-            )
-            print(
-                "Reconstructing all decomposed timesteps through "
-                f"safe time {safe_time}..."
-            )
-
-            if not _run_reconstruction_with_progress(
-                container=container,
-                command=reconstructPar_resume_cmd,
-                description="resume reconstructPar history",
-                simulation_directory=simulation_working_directory,
-                maximum_time=safe_time,
-            ):
-                return False
-
-            print("Resume history reconstruction finished.")
-
-            print("Checking whether the complete history was reconstructed...")
-            if not reconstructed_history_is_complete(
-                simulation_working_directory, safe_time
-            ):
-                print(
-                    "Resume operation aborted. Processor folders were preserved."
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "resume",
+                    "no safe timestep found",
+                    error="No safe timestep found for resume",
                 )
                 return False
 
-            print("Checking if the safe-time reconstruction is healthy...")
+            processor_directories = [
+                path
+                for path in simulation_working_directory.glob("processor*")
+                if path.is_dir()
+            ]
 
-            path_to_control_dict_parameter = (
-                Path(simulation_working_directory) / "Parameters" / "controlDict.cpp"
-            )
-
-            is_processor_deletion_safe = processor_deletion_is_safe(
-                PATH_TO_CONTROL_DICT_PARAMETERS=path_to_control_dict_parameter,
-                SIMULATION_DIRECTORY=simulation_working_directory,
-                RESUME=True,
-                TURBULENCE_MODEL=TURBULENCE_MODEL,
-            )
-
-            if not is_processor_deletion_safe:
-                print(
-                    f"Reconstructed data in '{simulation_working_directory}' failed integrity checks. "
-                    "Resume operation aborted. Case marked as failed."
+            # A resumed case may have been decomposed with a different core
+            # count by the old sequential pipeline. Reconstruct the existing
+            # processor data first, independent of the NEW allocation.
+            if processor_directories:
+                reconstruct_time_range = f":{safe_time}"
+                reconstruct_resume_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    f'reconstructPar -time "{reconstruct_time_range}" -noZero '
+                    "> log_resume.reconstructPar 2>&1'"
                 )
-                return False
 
-            print("Reconstruction looks healthy, continue to clean up...")
-            print("Deleting processor folders...")
+                if not _run_reconstruction_with_progress(
+                    container=container,
+                    command=reconstruct_resume_cmd,
+                    description="resume reconstructPar history",
+                    simulation_directory=simulation_working_directory,
+                    maximum_time=safe_time,
+                    status_callback=STATUS_CALLBACK,
+                ):
+                    return False
 
-            delete_processor_folders_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && rm -rf processor*'"
-            if not safe_exec(container, delete_processor_folders_cmd, "delete processor folders after resume reconstruction"):
-                return False
-            print("Deleted processor folder...")
+                if not reconstructed_history_is_complete(
+                    simulation_working_directory,
+                    safe_time,
+                    status_callback=STATUS_CALLBACK,
+                ):
+                    return False
 
-            decomposePar_resume_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && decomposePar > log_resume.decomposePar'"
-            print("decomposePar started...")
-            if not safe_exec(container, decomposePar_resume_cmd, "resume decomposePar"):
-                return False
-            print("decomposePar finished...")
+                path_to_control_dict_parameter = (
+                    simulation_working_directory / "Parameters" / "controlDict.cpp"
+                )
+                if not processor_deletion_is_safe(
+                    PATH_TO_CONTROL_DICT_PARAMETERS=path_to_control_dict_parameter,
+                    SIMULATION_DIRECTORY=simulation_working_directory,
+                    RESUME=True,
+                    TURBULENCE_MODEL=TURBULENCE_MODEL,
+                ):
+                    report_case_stage(
+                        STATUS_CALLBACK,
+                        "resume_check",
+                        "reconstructed safe timestep failed integrity checks",
+                        error="Resume reconstruction integrity check failed",
+                    )
+                    return False
 
-        # ---------------- SOLVER ----------------
-        if not MESH_ONLY:
-
-            if resume:
-                timestep_str = str(safe_time)
+                delete_processors_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && rm -rf processor*'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    delete_processors_cmd,
+                    "delete processor folders",
+                    STATUS_CALLBACK,
+                    "resumeCleanup",
+                ):
+                    return False
             else:
-                timestep_str = "0"
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "resume",
+                    f"complete fields already available at safe timestep {safe_time}",
+                    progress=100.0,
+                )
 
+            # Decompose again only if this scheduler assigned more than one
+            # core. A one-core resumed case continues directly from the root
+            # fields after any old processor data has been reconstructed.
+            if parallel_run:
+                decompose_resume_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "decomposePar > log_resume.decomposePar 2>&1'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    decompose_resume_cmd,
+                    "resume decomposePar",
+                    STATUS_CALLBACK,
+                    "decomposePar",
+                ):
+                    return False
+            else:
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "resume",
+                    f"serial resume from safe timestep {safe_time}",
+                    progress=100.0,
+                )
+
+        # ------------------------------------------------------------------
+        # SOLVER
+        # ------------------------------------------------------------------
+        if not MESH_ONLY:
+            timestep_str = str(safe_time) if resume else "0"
             end_on_mode = str(END_ON_MODE).strip().lower()
             monitor_stop_event = threading.Event()
 
-            # Avoid displaying progress from a solver log left by an older run.
-            solver_log_path = (
-                Path(simulation_working_directory)
-                / "log.pimpleFoam"
-            )
-
+            solver_log_path = simulation_working_directory / "log.pimpleFoam"
             try:
                 solver_log_path.unlink(missing_ok=True)
-            except OSError as error:
-                print(
-                    "WARNING: Could not remove old solver log before "
-                    f"starting: {error}"
-                )
+            except OSError:
+                pass
 
             if end_on_mode == "time":
                 parameter_control_dict = (
-                    Path(simulation_working_directory)
-                    / "Parameters"
-                    / "controlDict.cpp"
+                    simulation_working_directory / "Parameters" / "controlDict.cpp"
                 )
-
                 runtime_control_dict = (
-                    Path(simulation_working_directory)
-                    / "system"
-                    / "controlDict"
+                    simulation_working_directory / "system" / "controlDict"
                 )
 
                 try:
@@ -399,13 +393,11 @@ def openfoamSimulation(
                         parameter_control_dict,
                         "endTime",
                     )
-                    end_time_source = parameter_control_dict
                 except (FileNotFoundError, ValueError):
                     target_end_time = read_openfoam_scalar(
                         runtime_control_dict,
                         "endTime",
                     )
-                    end_time_source = runtime_control_dict
 
                 monitor_thread = threading.Thread(
                     target=run_time_progress_monitor,
@@ -414,17 +406,11 @@ def openfoamSimulation(
                         "end_time": target_end_time,
                         "check_interval": 5.0,
                         "stop_event": monitor_stop_event,
+                        "status_callback": STATUS_CALLBACK,
                     },
-                    name="pimple-time-progress-monitor",
+                    name=f"{simulation_name}-time-monitor",
                     daemon=True,
                 )
-
-                print(
-                    "Launching time-progress monitor | "
-                    f"endTime={target_end_time:.6f} s | "
-                    f"source={end_time_source}"
-                )
-
             else:
                 monitor_thread = threading.Thread(
                     target=run_convergence_monitor,
@@ -437,161 +423,183 @@ def openfoamSimulation(
                         "check_interval": convergence_check_interval,
                         "timestep": timestep_str,
                         "stop_event": monitor_stop_event,
+                        "status_callback": STATUS_CALLBACK,
                     },
-                    name="pimple-convergence-monitor",
+                    name=f"{simulation_name}-convergence-monitor",
                     daemon=True,
                 )
 
-                print(
-                    "Launching convergence monitor | "
-                    f"mode={end_on_mode} | "
-                    f"start timestep={timestep_str}"
-                )
-
             monitor_thread.start()
-
-            simRun_cmd = (
-                "bash -c '"
-                "set -o pipefail; "
-                "source /opt/openfoam13/etc/bashrc && "
-                f"mpirun --allow-run-as-root --use-hwthread-cpus "
-                f"-np {NUMBER_OF_CORES} "
-                "stdbuf -oL -eL "
-                "foamRun -solver incompressibleFluid -parallel "
-                "2>&1 | stdbuf -oL tee log.pimpleFoam"
-                "'"
+            report_case_stage(
+                STATUS_CALLBACK,
+                "solving",
+                f"solver started | {number_of_cores} core(s)",
+                progress=0.0 if end_on_mode == "time" else None,
             )
 
-            print("pimpleFoam solver started.")
+            if parallel_run:
+                sim_run_cmd = (
+                    "bash -c '"
+                    "set -o pipefail; "
+                    "source /opt/openfoam13/etc/bashrc && "
+                    f"mpirun --allow-run-as-root --use-hwthread-cpus -np {number_of_cores} "
+                    "stdbuf -oL -eL foamRun -solver incompressibleFluid -parallel "
+                    "2>&1 | stdbuf -oL tee log.pimpleFoam'"
+                )
+            else:
+                sim_run_cmd = (
+                    "bash -c '"
+                    "set -o pipefail; "
+                    "source /opt/openfoam13/etc/bashrc && "
+                    "stdbuf -oL -eL foamRun -solver incompressibleFluid "
+                    "2>&1 | stdbuf -oL tee log.pimpleFoam'"
+                )
 
             solver_successful = safe_exec(
                 container,
-                simRun_cmd,
-                "pimpleFoam solver",
+                sim_run_cmd,
+                "OpenFOAM solver",
+                status_callback=STATUS_CALLBACK,
             )
 
-            # Stop either monitor and wait until its dynamic terminal line has
-            # been closed before printing the final solver status.
             if monitor_stop_event is not None:
                 monitor_stop_event.set()
-
             if monitor_thread is not None and monitor_thread.is_alive():
                 monitor_thread.join(timeout=10)
-
-            if monitor_thread is not None and monitor_thread.is_alive():
-                print("WARNING: Solver monitor did not stop within timeout.")
 
             if not solver_successful:
                 return False
 
-            print("pimpleFoam solver finished.")
+            report_case_stage(STATUS_CALLBACK, "solving", "solver finished", progress=100.0)
 
-            reconstructPar_cmd = (
-                "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                "reconstructPar > log.reconstructPar 2>&1'"
-            )
-
-            print("Final reconstruction started.")
-
-            if not _run_reconstruction_with_progress(
-                container=container,
-                command=reconstructPar_cmd,
-                description="final reconstructPar",
-                simulation_directory=simulation_working_directory,
-                maximum_time=None,
-            ):
-                return False
-
-            print("Final reconstruction finished.")
-
+            if parallel_run:
+                reconstruct_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "reconstructPar > log.reconstructPar 2>&1'"
+                )
+                if not _run_reconstruction_with_progress(
+                    container=container,
+                    command=reconstruct_cmd,
+                    description="final reconstructPar",
+                    simulation_directory=simulation_working_directory,
+                    maximum_time=None,
+                    status_callback=STATUS_CALLBACK,
+                ):
+                    return False
         else:
-            print("Mesh-only mode: skipping solver.")
-            
-            reconstructPar_cmd = (
-                            "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                            "reconstructPar > log.reconstructPar 2>&1'"
-                        )
-            print("Reconstructing mesh started...")
-            if not safe_exec(container, reconstructPar_cmd, "reconstructPar"):
-                return False
-            print("Reconstructing mesh finished...")
+            report_case_stage(STATUS_CALLBACK, "meshOnly", "solver skipped")
 
-            checkMesh_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && checkMesh -allGeometry -allTopology -writeSets -setFormat vtk | tee log.checkMesh'"
-            print("checkMesh after reconstructing started...")
-            if not safe_exec(container, checkMesh_cmd, "checkMesh", print_output=True):
-                return False
-            print("checkMesh after reconstructing finished...")
-                        
+            if parallel_run:
+                reconstruct_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "reconstructPar > log.reconstructPar 2>&1'"
+                )
+                if not _run_reconstruction_with_progress(
+                    container=container,
+                    command=reconstruct_cmd,
+                    description="mesh reconstructPar",
+                    simulation_directory=simulation_working_directory,
+                    maximum_time=None,
+                    status_callback=STATUS_CALLBACK,
+                ):
+                    return False
 
+                check_mesh_after_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "checkMesh -allGeometry -allTopology -writeSets -setFormat vtk "
+                    "| tee log.checkMesh'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    check_mesh_after_cmd,
+                    "checkMesh after reconstruction",
+                    STATUS_CALLBACK,
+                    "checkMesh",
+                ):
+                    return False
 
-        # ---------------- FOAM FILE ----------------
-        foam_file_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && touch sim.foam'"
-        print("Creating FOAM file...")
-        if not safe_exec(container, foam_file_cmd, "create FOAM file"):
+        # ------------------------------------------------------------------
+        # Final bookkeeping / cleanup
+        # ------------------------------------------------------------------
+        foam_file_cmd = (
+            "bash -c 'source /opt/openfoam13/etc/bashrc && touch sim.foam'"
+        )
+        if not run_openfoam_command(
+            container,
+            foam_file_cmd,
+            "create FOAM file",
+            STATUS_CALLBACK,
+            "finalizing",
+        ):
             return False
-        print("FOAM File created...")
 
-        # ---------------- PROCESSOR CLEANUP CHECK ----------------
-        path_to_control_dict_parameter = (
-            Path(simulation_working_directory) / "Parameters" / "controlDict.cpp"
-        )
-
-        is_processor_deletion_safe = processor_deletion_is_safe(
-            PATH_TO_CONTROL_DICT_PARAMETERS=path_to_control_dict_parameter,
-            SIMULATION_DIRECTORY=simulation_working_directory,
-            RESUME=False,
-            TURBULENCE_MODEL=TURBULENCE_MODEL,
-        )
-
-        if is_processor_deletion_safe:
-            print("Reconstruction looks healthy, continue to clean up...")
-            print("Deleting processor folders...")
-
-            delete_processor_folders_cmd = "bash -c 'source /opt/openfoam13/etc/bashrc && rm -rf processor*'"
-            if not safe_exec(container, delete_processor_folders_cmd, "final delete processor folders"):
-                return False
-
-            print("Deleted processor folder...")
-            print("Cleanup complete. System ready for the next simulation.")
-
-        else:
-            print(
-                f"Reconstructed data in '{simulation_working_directory}' failed integrity checks. "
-                "Processor source files were preserved for safety and manual inspection."
+        if parallel_run:
+            path_to_control_dict_parameter = (
+                simulation_working_directory / "Parameters" / "controlDict.cpp"
             )
+            is_processor_deletion_safe = processor_deletion_is_safe(
+                PATH_TO_CONTROL_DICT_PARAMETERS=path_to_control_dict_parameter,
+                SIMULATION_DIRECTORY=simulation_working_directory,
+                RESUME=False,
+                TURBULENCE_MODEL=TURBULENCE_MODEL,
+            )
+
+            if is_processor_deletion_safe:
+                delete_processors_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && rm -rf processor*'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    delete_processors_cmd,
+                    "final processor cleanup",
+                    STATUS_CALLBACK,
+                    "cleanup",
+                ):
+                    return False
+            else:
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "cleanup",
+                    "processor folders preserved because reconstruction integrity check failed",
+                )
 
         status = True
-        return status
+        report_case_stage(STATUS_CALLBACK, "openfoam_done", "OpenFOAM stage complete", progress=100.0)
+        return True
 
-    except Exception as e:
-        print(f"Simulation case failed unexpectedly: {e}")
+    except Exception as error:
+        report_case_stage(
+            STATUS_CALLBACK,
+            "failed",
+            f"OpenFOAM case failed: {error}",
+            error=str(error),
+        )
         return False
 
     finally:
-        # Always stop the monitor belonging to this case before leaving this function.
         try:
             if monitor_stop_event is not None:
                 monitor_stop_event.set()
-
             if monitor_thread is not None and monitor_thread.is_alive():
                 monitor_thread.join(timeout=5)
+        except Exception:
+            pass
 
-        except Exception as e:
-            print(f"Monitor cleanup skipped/failed: {e}")
-
-        # Always attempt container cleanup, but never let cleanup crash the pipeline.
         if container is not None:
             try:
                 container.reload()
-
                 if container.status == "running":
-                    print(f"Stopping container '{container.name}'...")
+                    report_case_stage(STATUS_CALLBACK, "docker", "stopping container")
                     container.stop()
 
-                print(f"Removing container '{container.name}'...")
+                report_case_stage(STATUS_CALLBACK, "docker", "removing container")
                 container.remove(force=True)
+            except Exception as error:
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "docker",
+                    f"container cleanup warning: {error}",
+                )
 
-            except Exception as e:
-                print(f"Container cleanup skipped/failed: {e}")
-
-        print(f"openFoamSimulation returns status: {status}")
+        if not status:
+            report_case_stage(STATUS_CALLBACK, "failed", "OpenFOAM returned failure")

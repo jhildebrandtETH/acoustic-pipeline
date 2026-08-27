@@ -1,21 +1,26 @@
 name: of_pipeline_env
+
 channels:
   - defaults
 
 dependencies:
   - python=3.12
   - pip
+
   - pip:
-      # Force the proven working CPU-only PyTorch build.
+      # CPU-only PyTorch build used by the acoustic solver.
+      # Keep this extra index directly before the torch package.
       - --extra-index-url https://download.pytorch.org/whl/cpu
       - torch==2.13.0+cpu
 
-      # Direct dependencies of the main pipeline.
+      # Direct dependencies of the CFD/acoustic pipeline.
       - docker==7.1.0
       - trimesh==4.12.2
+      - numpy>=1.26,<3
       - pandas>=2.2,<3
+      - matplotlib>=3.8,<4
       - reportlab>=4.1,<5
 
-      # Installs FoamAcoustics and its core dependencies from the submodule.
-      # Run `conda env create` from the repository root.
+      # Install FoamAcoustics and its own package dependencies from the
+      # repository submodule. Run `conda env create` from the repository root.
       - -e ./acousticSolver

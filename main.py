@@ -1,35 +1,35 @@
 import argparse
 from pathlib import Path
 
-from preprocessing import preprocessing
-from openfoamSimulation import openfoamSimulation
-from postprocessing import postprocessing
+from tools import RuntimeStatusRegistry
+from tools import SimulationOrderStore
 from tools import create_simulation_order
-from tools import load_simulation_order
-from tools import update_case_status
-from tools import has_timestep
-from tools import reset_case_folder
-from tools import get_safe_timestep
+from tools import ensure_scheduler_metadata
 from tools import find_source_stls
+from tools import initialize_runtime_queue_states
+from tools import load_simulation_order
+from tools import reactivate_failed_cases_for_resume
+from tools import run_parallel_scheduler
+from tools import save_simulation_order
+from tools import validate_acoustic_arguments
 
 
 def main() -> None:
+    convergence_monitoring_revolutions_count = 1000
+    convergence_tolerance = 1e-3
+    scheduler_poll_interval = 0.5
+
     pipeline_main_directory = Path(__file__).resolve().parent
 
     parser = argparse.ArgumentParser(
-        description="Dispatch OpenFOAM simulations."
+        description="Dispatch OpenFOAM simulations with throughput-oriented parallel scheduling."
     )
-
     parser.add_argument(
         "--sim-dir",
         type=Path,
         required=True,
-        help=(
-            "Directory containing source_meshes and where simulation "
-            "cases will be created or resumed."
-        ),
+        help="Simulation-order directory containing STL/ and FEATURES/.",
     )
-
     parser.add_argument("--rpms", nargs="+", type=int)
     parser.add_argument("--mode", choices=["AMI", "MRF"])
     parser.add_argument(
@@ -38,20 +38,30 @@ def main() -> None:
     )
     parser.add_argument(
         "--field-init",
-        default="on",
+        default="off",
         choices=["on", "off"],
+        help=(
+            "off: all cases are independent (maximum throughput). "
+            "on: each geometry forms a sequential RPM initialization chain."
+        ),
     )
     parser.add_argument("--study", action="store_true")
     parser.add_argument("--study-file")
     parser.add_argument("--study-parameter")
     parser.add_argument(
         "--study-values",
+        help="Study values separated by '...'. Example: '(8 24 8)...(16 48 16)'",
+    )
+    parser.add_argument(
+        "--total-cores",
+        "--cores",
+        dest="total_cores",
+        type=int,
         help=(
-            "Study values separated by '...'. "
-            "Example: '(8 24 8)...(16 48 16)'"
+            "Total CPU-core budget for the complete simulation order. "
+            "--cores remains accepted as a backward-compatible alias."
         ),
     )
-    parser.add_argument("--cores", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--mesh-only", action="store_true")
     parser.add_argument("--allow-bad-mesh", action="store_true")
@@ -65,40 +75,72 @@ def main() -> None:
         ],
         default="convergence",
     )
-
-    parser.add_argument("--acoustic-surface", choices=["permeable","impermeable"], help=("impermeable: propeller surface for propagation | permeable: sphere with varying radius"))
-
-    parser.add_argument("--acoustic-sphere-diameter", default=None, type=float)
+    parser.add_argument(
+        "--acoustic-surface",
+        choices=["permeable", "impermeable"],
+        help=(
+            "impermeable: propeller surface | permeable: enclosing sphere"
+        ),
+    )
+    parser.add_argument(
+        "--acoustic-sphere-diameter",
+        default=None,
+        type=float,
+        help="Permeable sphere diameter as a multiple of propeller diameter.",
+    )
 
     args = parser.parse_args()
-
     simulations_directory = args.sim_dir.resolve()
     source_meshes_directory = simulations_directory / "STL"
 
-    # All available source meshes are determined from the source_meshes folder.
     try:
         source_meshes = find_source_stls(source_meshes_directory)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
 
-    # -------- RESUME / NEW RUN VALIDATION --------
+    # ----------------------------------------------------------------------
+    # RESUME EXISTING ORDER
+    # ----------------------------------------------------------------------
     if args.resume:
         if not simulations_directory.exists():
-            parser.error(
-                f"--sim-dir does not exist: {simulations_directory}"
-            )
+            parser.error(f"--sim-dir does not exist: {simulations_directory}")
 
         order_file = simulations_directory / "simulation_order.json"
-
         if not order_file.exists():
             parser.error(
-                "--resume was used, but no simulation_order.json was found "
-                f"in {simulations_directory}"
+                "--resume was used, but no simulation_order.json was found in "
+                f"{simulations_directory}"
             )
 
-        order = load_simulation_order(simulations_directory)
+        raw_order = load_simulation_order(simulations_directory)
+        legacy_order = "total_cores" not in raw_order
 
-        # The resumed order must use the new mesh-based schema.
+        if legacy_order and args.total_cores is None:
+            parser.error(
+                "Legacy simulation_order.json detected: its stored 'cores' "
+                "value meant cores per case. Resume this order once with "
+                "--total-cores <available cores> so the new scheduler can "
+                "migrate it without guessing."
+            )
+
+        if (
+            not legacy_order
+            and args.total_cores is not None
+            and int(args.total_cores) != int(raw_order["total_cores"])
+        ):
+            parser.error(
+                "This simulation order already has a stored total-core budget "
+                f"of {raw_order['total_cores']}. Changing the allocation during "
+                "--resume is intentionally disabled because cases may already "
+                "be decomposed with the stored core count."
+            )
+
+        order = ensure_scheduler_metadata(
+            raw_order,
+            total_cores_override=args.total_cores if legacy_order else None,
+        )
+        save_simulation_order(simulations_directory, order)
+
         args.mode = order["mode"]
         args.meshes = order["meshes"]
         args.rpms = order["rpms"]
@@ -107,394 +149,149 @@ def main() -> None:
         args.study_file = order["study_file"]
         args.study_parameter = order["study_parameter"]
         args.study_values = order["study_values"]
-        args.cores = order["cores"]
+        args.total_cores = int(order["total_cores"])
         args.mesh_only = order["mesh_only"]
         args.allow_bad_mesh = order["allow_bad_mesh"]
         args.turbulence = order["turbulence"]
         args.end_on = order["end_on"]
+        args.acoustic_surface = order.get("acoustic_surface")
+        args.acoustic_sphere_diameter = order.get("acoustic_sphere_diameter")
 
         missing_source_meshes = [
-            mesh
-            for mesh in args.meshes
-            if mesh not in source_meshes
+            mesh for mesh in args.meshes if mesh not in source_meshes
         ]
-
         if missing_source_meshes:
             parser.error(
-                "The following meshes from simulation_order.json are "
-                "missing from source_meshes: "
-                + ", ".join(missing_source_meshes)
+                "The following meshes from simulation_order.json are missing "
+                "from STL/: " + ", ".join(missing_source_meshes)
             )
 
-        print(
-            f"\n--- Resuming simulation batch from: "
-            f"{simulations_directory} ---"
+        order_store = SimulationOrderStore(simulations_directory)
+        reactivate_failed_cases_for_resume(
+            order_store,
+            simulations_directory,
         )
-        print(f"Mode: {args.mode}")
-        print(f"Meshes: {args.meshes}")
-        print(f"RPMs: {args.rpms}")
-        print(f"Cores: {args.cores}")
-        print(f"Study: {args.study}")
+        order = order_store.snapshot()
 
+    # ----------------------------------------------------------------------
+    # CREATE NEW ORDER
+    # ----------------------------------------------------------------------
     else:
-        # For a new order, all meshes found in source_meshes are used.
         args.meshes = list(source_meshes.keys())
-
         missing = []
 
         if args.rpms is None:
             missing.append("--rpms")
-
         if args.mode is None:
             missing.append("--mode")
-
-        if args.cores is None:
-            missing.append("--cores")
-
+        if args.total_cores is None:
+            missing.append("--total-cores")
         if args.turbulence is None:
             missing.append("--turbulence")
+        if not args.mesh_only and args.acoustic_surface is None:
+            missing.append("--acoustic-surface")
 
         if missing:
             parser.error(
-                "The following arguments are required for a new "
-                "simulation run: "
+                "The following arguments are required for a new simulation run: "
                 + ", ".join(missing)
             )
 
+        if args.total_cores is not None and args.total_cores < 1:
+            parser.error("--total-cores must be at least 1")
+
+        if len(set(args.rpms or [])) != len(args.rpms or []):
+            parser.error("--rpms must not contain duplicate values")
+
+        if args.field_init == "on" and args.rpms != sorted(args.rpms):
+            parser.error(
+                "--field-init on requires RPM values in ascending order because "
+                "each case is initialized from the preceding RPM case."
+            )
+
+        validate_acoustic_arguments(parser, args)
+
         if args.study:
             study_missing = []
-
             if args.study_file is None:
                 study_missing.append("--study-file")
-
             if args.study_parameter is None:
                 study_missing.append("--study-parameter")
-
             if args.study_values is None:
                 study_missing.append("--study-values")
 
             if study_missing:
                 parser.error(
-                    "The following arguments are required when "
-                    "--study is set: "
+                    "The following arguments are required when --study is set: "
                     + ", ".join(study_missing)
                 )
 
             if len(args.meshes) != 1 or len(args.rpms) != 1:
                 parser.error(
-                    "When --study is set, STL must contain "
-                    "exactly one mesh and exactly one RPM must be provided."
+                    "When --study is set, STL/ must contain exactly one mesh "
+                    "and exactly one RPM must be provided."
                 )
-            if args.acoustic_surface == "impermeable" and args.acoustic_sphere_diameter is not None:
-                parser.error("Impermable acoustic solver mode has been selected but a sphere diameter factor was given. Check given conditions.")
-            if args.acoustic_surface == "permeable" and args.acoustic_sphere_diameter is None:
-                args.acoustic_sphere_diameter = 2.5
-        simulations_directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
 
+            if args.field_init == "on":
+                parser.error(
+                    "--field-init on is not supported together with --study. "
+                    "Study cases are independent by design."
+                )
+
+        simulations_directory.mkdir(parents=True, exist_ok=True)
         create_simulation_order(
             args=args,
             simulations_directory=simulations_directory,
         )
+        order_store = SimulationOrderStore(simulations_directory)
+        order = order_store.snapshot()
 
-        order = load_simulation_order(simulations_directory)
+    # ----------------------------------------------------------------------
+    # START SCHEDULER
+    # ----------------------------------------------------------------------
+    registry = RuntimeStatusRegistry(order["cases"])
+    initialize_runtime_queue_states(order, registry)
 
+    print(
+        "\nParallel scheduler configured:\n"
+        f"  total cores       : {order['total_cores']}\n"
+        f"  cores per case    : {order['cores_per_case']}"
+        f"{('-' + str(order.get('max_cores_per_case'))) if order.get('max_cores_per_case', order['cores_per_case']) != order['cores_per_case'] else ''}\n"
+        f"  max parallel cases: {order['max_parallel_cases']}\n"
+        f"  field init        : {args.field_init}\n"
+    )
+
+    run_parallel_scheduler(
+        pipeline_main_directory=pipeline_main_directory,
+        simulations_directory=simulations_directory,
+        source_meshes_directory=source_meshes_directory,
+        source_meshes=source_meshes,
+        order_store=order_store,
+        registry=registry,
+        args=args,
+        convergence_monitoring_revolutions_count=(
+            convergence_monitoring_revolutions_count
+        ),
+        convergence_tolerance=convergence_tolerance,
+        scheduler_poll_interval=scheduler_poll_interval,
+    )
+
+    final_order = order_store.snapshot()
+    failed = [
+        case for case in final_order["cases"] if case["status"] == "failed"
+    ]
+    blocked = [
+        case for case in final_order["cases"] if case["status"] == "blocked"
+    ]
+
+    if failed or blocked:
         print(
-            f"\nFound source meshes: {args.meshes}"
+            f"\nSimulation order finished with {len(failed)} failed and "
+            f"{len(blocked)} blocked case(s). Use --resume after correcting "
+            "the underlying issue."
         )
-
-    convergence_monitoring_revolutions_count = 1000
-    convergence_tolerance = 1e-3
-
-    previous_simulation_by_mesh = {}
-
-    # -------- UNIFIED CASE-BASED PIPELINE --------
-    for case in order["cases"]:
-        folder_name = case["folder"]
-        mesh = case["mesh"]
-        rpm = int(case["rpm"])
-        mode = case["mode"]
-        status = case["status"]
-        is_study_case = case["study"]
-
-        if mesh not in source_meshes:
-            raise FileNotFoundError(
-                f"Source mesh '{mesh}' was not found in "
-                f"{source_meshes_directory}"
-            )
-
-        source_mesh_path = source_meshes[mesh]
-
-        simulation_path = simulations_directory / folder_name
-        simulation_path.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        print(
-            f"\n--- Case: {folder_name} | Status: {status} ---"
-        )
-        print(f"Source mesh: {source_mesh_path}")
-
-        # Failed cases are terminal in normal mode to avoid infinite
-        # retry loops. With --resume, failed cases are reactivated.
-        if status == "failed":
-            if args.resume:
-                print("Reactivating failed case for resume...")
-
-                update_case_status(
-                    simulations_directory,
-                    folder_name,
-                    "solver_running",
-                )
-
-                status = "solver_running"
-
-            else:
-                print(
-                    "Skipping failed case. Use --resume to resume it."
-                )
-                continue
-
-        if status == "postprocessing_done":
-            print("Skipping completed case.")
-
-            if not is_study_case:
-                previous_simulation_by_mesh[mesh] = simulation_path
-
-            continue
-
-        previous_simulation_path = previous_simulation_by_mesh.get(mesh)
-
-        use_previous_init = (
-            args.field_init == "on"
-            and previous_simulation_path is not None
-            and not is_study_case
-        )
-
-        # Inner loop allows a clean restart to return to preprocessing
-        # for the same case instead of moving to the next case.
-        while status != "postprocessing_done":
-
-            # ---------------- PREPROCESSING ----------------
-            if status == "pending":
-                print("Starting preprocessing...")
-
-                preprocessing_kwargs = dict(
-                    SIMULATION_NAME = folder_name,
-                    RPM_COUNT=rpm,
-                    MAIN_DIRECTORY=pipeline_main_directory,
-                    TARGET_DIRECTORY=simulation_path,
-                    CORES_TO_USE=args.cores,
-                    MODE=mode,
-                    INIT_FROM_PREVIOUS=use_previous_init,
-                    PREVIOUS_SIMULATION_PATH=previous_simulation_path,
-                    TURBULENCE_MODEL=args.turbulence,
-                    ACOUSTIC_SURFACE = args.acoustic_surface,
-                    ACOUSTIC_SPHERE_DIAMETER = args.acoustic_sphere_diameter,
-                )
-
-                if is_study_case:
-                    preprocessing_kwargs.update(
-                        STUDY_PARAMETER_NAME=case["study_parameter"],
-                        STUDY_PARAMETER_FILE=case["study_file"],
-                        STUDY_PARAMETER=case["study_value"],
-                    )
-
-                preprocessing(**preprocessing_kwargs)
-
-                update_case_status(
-                    simulations_directory,
-                    folder_name,
-                    "preprocessing_done",
-                )
-
-                status = "preprocessing_done"
-                continue
-
-            # ---------------- SOLVER START ----------------
-            if status == "preprocessing_done":
-                print("Starting OpenFOAM...")
-
-                update_case_status(
-                    simulations_directory,
-                    folder_name,
-                    "solver_running",
-                )
-
-                success = openfoamSimulation(
-                    resume=False,
-                    simulation_name=folder_name,
-                    simulation_working_directory=simulation_path,
-                    convergence_tolerance=convergence_tolerance,
-                    rpm_count=rpm,
-                    convergence_window_revolutions=(
-                        convergence_monitoring_revolutions_count
-                    ),
-                    MODE=mode,
-                    END_ON_MODE=args.end_on,
-                    TURBULENCE_MODEL=args.turbulence,
-                    initialize_from_previous=use_previous_init,
-                    previous_simulation_path=previous_simulation_path,
-                    NUMBER_OF_CORES=args.cores,
-                    MESH_ONLY=args.mesh_only,
-                    ALLOW_BAD_MESH=args.allow_bad_mesh,
-                )
-
-                if success:
-                    update_case_status(
-                        simulations_directory,
-                        folder_name,
-                        "solver_done",
-                    )
-
-                    status = "solver_done"
-
-                    if args.mesh_only:
-                        update_case_status(
-                            simulations_directory,
-                            folder_name,
-                            "postprocessing_done",
-                        )
-
-                        status = "postprocessing_done"
-
-                else:
-                    update_case_status(
-                        simulations_directory,
-                        folder_name,
-                        "failed",
-                    )
-
-                    status = "failed"
-                    break
-
-                continue
-
-            # ---------------- SOLVER RESUME ----------------
-            if status == "solver_running":
-                processor0_path = simulation_path / "processor0"
-
-                if not has_timestep(processor0_path):
-                    print(
-                        "Solver marked as running but no timesteps "
-                        "were found -> clean restart"
-                    )
-
-                    reset_case_folder(simulation_path)
-
-                    update_case_status(
-                        simulations_directory,
-                        folder_name,
-                        "pending",
-                    )
-
-                    status = "pending"
-                    continue
-
-                safe_time = get_safe_timestep(simulation_path)
-
-                if safe_time is None:
-                    print(
-                        "Timesteps exist but none are usable "
-                        "-> clean restart"
-                    )
-
-                    reset_case_folder(simulation_path)
-
-                    update_case_status(
-                        simulations_directory,
-                        folder_name,
-                        "pending",
-                    )
-
-                    status = "pending"
-                    continue
-
-                print(
-                    f"Resuming solver from safe timestep: {safe_time}"
-                )
-
-                success = openfoamSimulation(
-                    resume=True,
-                    simulation_name=folder_name,
-                    simulation_working_directory=simulation_path,
-                    convergence_tolerance=convergence_tolerance,
-                    rpm_count=rpm,
-                    convergence_window_revolutions=(
-                        convergence_monitoring_revolutions_count
-                    ),
-                    MODE=mode,
-                    END_ON_MODE=args.end_on,
-                    TURBULENCE_MODEL=args.turbulence,
-                    initialize_from_previous=use_previous_init,
-                    previous_simulation_path=previous_simulation_path,
-                    NUMBER_OF_CORES=args.cores,
-                    MESH_ONLY=args.mesh_only,
-                    ALLOW_BAD_MESH=args.allow_bad_mesh,
-                )
-
-                if success:
-                    update_case_status(
-                        simulations_directory,
-                        folder_name,
-                        "solver_done",
-                    )
-
-                    status = "solver_done"
-
-                    if args.mesh_only:
-                        update_case_status(
-                            simulations_directory,
-                            folder_name,
-                            "postprocessing_done",
-                        )
-
-                        status = "postprocessing_done"
-
-                else:
-                    update_case_status(
-                        simulations_directory,
-                        folder_name,
-                        "failed",
-                    )
-
-                    status = "failed"
-                    break
-
-                continue
-
-            # ---------------- POSTPROCESSING ----------------
-            if status == "solver_done":
-                print("Starting postprocessing...")
-
-                postprocessing(
-                    ACOUSTIC_SURFACE=args.acoustic_surface,
-                    SIMULATION_WORKING_DIRECTORY=simulation_path,
-                    RPM_COUNT=rpm,
-                    MODE=mode,
-                    TURBULENCE_MODEL=args.turbulence,
-                )
-
-                update_case_status(
-                    simulations_directory,
-                    folder_name,
-                    "postprocessing_done",
-                )
-
-                status = "postprocessing_done"
-                continue
-
-            raise ValueError(
-                f"Unknown case status for {folder_name}: {status}"
-            )
-
-        if status == "postprocessing_done" and not is_study_case:
-            previous_simulation_by_mesh[mesh] = simulation_path
-
-    print("\nAll simulations completed.")
+    else:
+        print("\nAll simulations completed successfully.")
 
 
 if __name__ == "__main__":
