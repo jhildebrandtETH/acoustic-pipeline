@@ -4,6 +4,7 @@ from pathlib import Path
 
 import docker
 
+from cfmesh import generate_boundary_layers
 from tools import _run_reconstruction_with_progress
 from tools import ensure_case_core_configuration
 from tools import remove_stale_stopped_container
@@ -17,6 +18,7 @@ from tools import reconstructed_history_is_complete
 from tools import run_convergence_monitor
 from tools import run_time_progress_monitor
 from tools import safe_exec
+from tools import verify_openfoam_patch_exists
 
 
 def openfoamSimulation(
@@ -32,6 +34,7 @@ def openfoamSimulation(
     MESH_ONLY,
     END_ON_MODE,
     ALLOW_BAD_MESH,
+    BOUNDARY_LAYER_METHOD="cfmesh",
     initialize_from_previous=False,
     previous_simulation_path=None,
     STATUS_CALLBACK=None,
@@ -40,7 +43,11 @@ def openfoamSimulation(
     Run one complete OpenFOAM case inside its own Docker container.
 
     NUMBER_OF_CORES == 1 uses a true serial OpenFOAM path. Two or more cores use
-    the existing decomposed MPI path.
+    the decomposed MPI path. When cfMesh boundary layers are enabled, the
+    parallel snappy mesh is reconstructed to the root case, layered by
+    host-side cfMesh using this case's allocated core count, checked by
+    OpenFOAM 13, and re-decomposed before NCC/solver execution. Mesh-only mode
+    stops after the final selected mesh workflow and leaves sim.foam.
     """
     convergence_check_interval = 1
 
@@ -52,9 +59,18 @@ def openfoamSimulation(
     simulation_working_directory = Path(simulation_working_directory)
     number_of_cores = int(NUMBER_OF_CORES)
     parallel_run = number_of_cores > 1
+    boundary_layer_method = str(BOUNDARY_LAYER_METHOD).strip().lower()
+
+    if boundary_layer_method not in {"none", "cfmesh"}:
+        raise ValueError(
+            "BOUNDARY_LAYER_METHOD must be one of: 'none', 'cfmesh'"
+        )
 
     if number_of_cores < 1:
         raise ValueError("NUMBER_OF_CORES must be at least 1")
+
+    if MESH_ONLY and resume:
+        raise ValueError("--mesh-only cannot be combined with --resume")
 
     try:
         # The scheduler is the single source of truth for MPI decomposition.
@@ -168,11 +184,67 @@ def openfoamSimulation(
             ):
                 return False
 
-            check_mesh_cmd = (
-                "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                "checkMesh -allGeometry -allTopology -writeSets -setFormat vtk "
-                "| tee log.checkMesh'"
-            )
+            # cfMesh operates on the root constant/polyMesh. Mesh-only cases
+            # also need a root mesh for checkMesh/ParaView. Therefore rebuild
+            # the root mesh after parallel snappy whenever either condition
+            # applies.
+            root_mesh_required = MESH_ONLY or boundary_layer_method == "cfmesh"
+
+            if parallel_run and root_mesh_required:
+                reconstruct_mesh_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "reconstructPar > log.reconstructParMesh 2>&1'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    reconstruct_mesh_cmd,
+                    "reconstructPar mesh",
+                    STATUS_CALLBACK,
+                    "reconstructPar",
+                ):
+                    return False
+
+                try:
+                    verify_openfoam_patch_exists(
+                        simulation_working_directory,
+                        "propeller",
+                    )
+                except (FileNotFoundError, ValueError) as error:
+                    report_case_stage(
+                        STATUS_CALLBACK,
+                        "meshReconstructionCheck",
+                        str(error),
+                        error=(
+                            "Parallel snappy mesh was not reconstructed to "
+                            "constant/polyMesh"
+                        ),
+                    )
+                    return False
+
+            # Keep a separate snappy baseline when cfMesh is enabled. The
+            # baseline check deliberately does not write sets because cfMesh
+            # should receive a clean root mesh.
+            if boundary_layer_method == "cfmesh":
+                check_mesh_log_name = "log.checkMesh.snappy"
+                check_mesh_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "checkMesh -allGeometry -allTopology "
+                    "| tee log.checkMesh.snappy'"
+                )
+            elif MESH_ONLY:
+                check_mesh_log_name = "log.checkMesh"
+                check_mesh_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "checkMesh -allGeometry -allTopology | tee log.checkMesh'"
+                )
+            else:
+                check_mesh_log_name = "log.checkMesh"
+                check_mesh_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "checkMesh -allGeometry -allTopology -writeSets -setFormat vtk "
+                    "| tee log.checkMesh'"
+                )
+
             if not run_openfoam_command(
                 container,
                 check_mesh_cmd,
@@ -182,25 +254,9 @@ def openfoamSimulation(
             ):
                 return False
 
-            vtk_cell_sets_cmd = (
-                "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                "for cell_set in underdeterminedCells oneInternalFaceCells "
-                "twoInternalFacesCells; do "
-                "if [ -f constant/polyMesh/sets/$cell_set ]; then "
-                "foamToVTK -constant -cellSet $cell_set; "
-                "fi; "
-                "done'"
+            check_mesh_log_path = (
+                simulation_working_directory / check_mesh_log_name
             )
-            if not run_openfoam_command(
-                container,
-                vtk_cell_sets_cmd,
-                "foamToVTK cell-set conversion",
-                STATUS_CALLBACK,
-                "meshDiagnostics",
-            ):
-                return False
-
-            check_mesh_log_path = simulation_working_directory / "log.checkMesh"
             if not (is_mesh_ok(check_mesh_log_path, quiet=True) or ALLOW_BAD_MESH):
                 report_case_stage(
                     STATUS_CALLBACK,
@@ -209,6 +265,139 @@ def openfoamSimulation(
                     error="Mesh is not OK",
                 )
                 return False
+
+            # --------------------------------------------------------------
+            # cfMesh boundary-layer generation
+            # --------------------------------------------------------------
+            if boundary_layer_method == "cfmesh":
+                # The processor meshes contain the pre-cfMesh snappy result.
+                # They become invalid as soon as cfMesh modifies the root mesh,
+                # so discard them before the host-side layer operation.
+                if parallel_run:
+                    discard_snappy_processors_cmd = (
+                        "bash -c 'rm -rf processor*'"
+                    )
+                    if not run_openfoam_command(
+                        container,
+                        discard_snappy_processors_cmd,
+                        "discard pre-cfMesh processor meshes",
+                        STATUS_CALLBACK,
+                        "cfMeshPrep",
+                    ):
+                        return False
+
+                if not generate_boundary_layers(
+                    simulation_working_directory=simulation_working_directory,
+                    number_of_cores=number_of_cores,
+                    status_callback=STATUS_CALLBACK,
+                ):
+                    return False
+
+                # Final mesh validation is always performed by OpenFOAM 13,
+                # not by cfMesh's bundled OpenFOAM runtime. Surface diagnostics
+                # make skew/non-orthogonal problem locations directly
+                # inspectable in ParaView.
+                check_mesh_after_cfmesh_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "checkMesh -allGeometry -allTopology "
+                    "-writeSurfaces -surfaceFormat vtk "
+                    "-writeSets -setFormat vtk "
+                    "| tee log.checkMesh'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    check_mesh_after_cfmesh_cmd,
+                    "checkMesh after cfMesh",
+                    STATUS_CALLBACK,
+                    "checkMeshCfMesh",
+                ):
+                    return False
+
+                final_mesh_log_path = (
+                    simulation_working_directory / "log.checkMesh"
+                )
+                if not (
+                    is_mesh_ok(final_mesh_log_path, quiet=True)
+                    or ALLOW_BAD_MESH
+                ):
+                    report_case_stage(
+                        STATUS_CALLBACK,
+                        "checkMeshCfMesh",
+                        (
+                            "cfMesh-layered mesh check failed and "
+                            "--allow-bad-mesh is not set"
+                        ),
+                        error="cfMesh-layered mesh is not OK",
+                    )
+                    return False
+
+            # --mesh-only is a strict early-exit path after the requested mesh
+            # generation method and final checkMesh. Never create NCCs or run
+            # solver/postprocessing work. Keep sim.foam for direct ParaView.
+            if MESH_ONLY:
+                foam_file_cmd = "bash -c 'touch sim.foam'"
+                if not run_openfoam_command(
+                    container,
+                    foam_file_cmd,
+                    "create FOAM file",
+                    STATUS_CALLBACK,
+                    "finalizing",
+                ):
+                    return False
+
+                status = True
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "meshOnly",
+                    "mesh-only case complete after final checkMesh",
+                    progress=100.0,
+                )
+                report_case_stage(
+                    STATUS_CALLBACK,
+                    "openfoam_done",
+                    "OpenFOAM mesh-only stage complete",
+                    progress=100.0,
+                )
+                return True
+
+            # For a normal parallel cfMesh case, the processor meshes were
+            # intentionally discarded before layer generation. Re-decompose
+            # the final layered root mesh before NCC and the solver continue.
+            if boundary_layer_method == "cfmesh" and parallel_run:
+                decompose_layered_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "decomposePar -copyZero > log.decomposeParAfterCfMesh 2>&1'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    decompose_layered_cmd,
+                    "decompose layered mesh",
+                    STATUS_CALLBACK,
+                    "decomposeParAfterCfMesh",
+                ):
+                    return False
+
+            # Preserve the existing diagnostic cell-set conversion only for
+            # the legacy snappy-only path. cfMesh diagnostics are already
+            # written by the final OpenFOAM-13 checkMesh above.
+            if boundary_layer_method == "none":
+                vtk_cell_sets_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "for cell_set in underdeterminedCells oneInternalFaceCells "
+                    "twoInternalFacesCells; do "
+                    "if [ -f constant/polyMesh/sets/$cell_set ]; then "
+                    "foamToVTK -constant -cellSet $cell_set; "
+                    "fi; "
+                    "done'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    vtk_cell_sets_cmd,
+                    "foamToVTK cell-set conversion",
+                    STATUS_CALLBACK,
+                    "meshDiagnostics",
+                ):
+                    return False
 
             if MODE == "AMI":
                 if parallel_run:
@@ -369,155 +558,123 @@ def openfoamSimulation(
         # ------------------------------------------------------------------
         # SOLVER
         # ------------------------------------------------------------------
-        if not MESH_ONLY:
-            timestep_str = str(safe_time) if resume else "0"
-            end_on_mode = str(END_ON_MODE).strip().lower()
-            monitor_stop_event = threading.Event()
+        # Mesh-only cases have already returned immediately after checkMesh.
+        timestep_str = str(safe_time) if resume else "0"
+        end_on_mode = str(END_ON_MODE).strip().lower()
+        monitor_stop_event = threading.Event()
 
-            solver_log_path = simulation_working_directory / "log.pimpleFoam"
+        solver_log_path = simulation_working_directory / "log.pimpleFoam"
+        try:
+            solver_log_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        if end_on_mode == "time":
+            parameter_control_dict = (
+                simulation_working_directory / "Parameters" / "controlDict.cpp"
+            )
+            runtime_control_dict = (
+                simulation_working_directory / "system" / "controlDict"
+            )
+
             try:
-                solver_log_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-            if end_on_mode == "time":
-                parameter_control_dict = (
-                    simulation_working_directory / "Parameters" / "controlDict.cpp"
+                target_end_time = read_openfoam_scalar(
+                    parameter_control_dict,
+                    "endTime",
                 )
-                runtime_control_dict = (
-                    simulation_working_directory / "system" / "controlDict"
+            except (FileNotFoundError, ValueError):
+                target_end_time = read_openfoam_scalar(
+                    runtime_control_dict,
+                    "endTime",
                 )
 
-                try:
-                    target_end_time = read_openfoam_scalar(
-                        parameter_control_dict,
-                        "endTime",
-                    )
-                except (FileNotFoundError, ValueError):
-                    target_end_time = read_openfoam_scalar(
-                        runtime_control_dict,
-                        "endTime",
-                    )
-
-                monitor_thread = threading.Thread(
-                    target=run_time_progress_monitor,
-                    kwargs={
-                        "main_sim_folder": simulation_working_directory,
-                        "end_time": target_end_time,
-                        "check_interval": 5.0,
-                        "stop_event": monitor_stop_event,
-                        "status_callback": STATUS_CALLBACK,
-                    },
-                    name=f"{simulation_name}-time-monitor",
-                    daemon=True,
-                )
-            else:
-                monitor_thread = threading.Thread(
-                    target=run_convergence_monitor,
-                    kwargs={
-                        "main_sim_folder": simulation_working_directory,
-                        "rpm": rpm_count,
-                        "avg_history_count": convergence_window_revolutions,
-                        "tolerance": convergence_tolerance,
-                        "convergence_mode": end_on_mode,
-                        "check_interval": convergence_check_interval,
-                        "timestep": timestep_str,
-                        "stop_event": monitor_stop_event,
-                        "status_callback": STATUS_CALLBACK,
-                    },
-                    name=f"{simulation_name}-convergence-monitor",
-                    daemon=True,
-                )
-
-            monitor_thread.start()
-            report_case_stage(
-                STATUS_CALLBACK,
-                "solving",
-                f"solver started | {number_of_cores} core(s)",
-                progress=0.0 if end_on_mode == "time" else None,
+            monitor_thread = threading.Thread(
+                target=run_time_progress_monitor,
+                kwargs={
+                    "main_sim_folder": simulation_working_directory,
+                    "end_time": target_end_time,
+                    "check_interval": 5.0,
+                    "stop_event": monitor_stop_event,
+                    "status_callback": STATUS_CALLBACK,
+                },
+                name=f"{simulation_name}-time-monitor",
+                daemon=True,
             )
-
-            if parallel_run:
-                sim_run_cmd = (
-                    "bash -c '"
-                    "set -o pipefail; "
-                    "source /opt/openfoam13/etc/bashrc && "
-                    f"mpirun --allow-run-as-root --use-hwthread-cpus -np {number_of_cores} "
-                    "stdbuf -oL -eL foamRun -solver incompressibleFluid -parallel "
-                    "2>&1 | stdbuf -oL tee log.pimpleFoam'"
-                )
-            else:
-                sim_run_cmd = (
-                    "bash -c '"
-                    "set -o pipefail; "
-                    "source /opt/openfoam13/etc/bashrc && "
-                    "stdbuf -oL -eL foamRun -solver incompressibleFluid "
-                    "2>&1 | stdbuf -oL tee log.pimpleFoam'"
-                )
-
-            solver_successful = safe_exec(
-                container,
-                sim_run_cmd,
-                "OpenFOAM solver",
-                status_callback=STATUS_CALLBACK,
-            )
-
-            if monitor_stop_event is not None:
-                monitor_stop_event.set()
-            if monitor_thread is not None and monitor_thread.is_alive():
-                monitor_thread.join(timeout=10)
-
-            if not solver_successful:
-                return False
-
-            report_case_stage(STATUS_CALLBACK, "solving", "solver finished", progress=100.0)
-
-            if parallel_run:
-                reconstruct_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "reconstructPar > log.reconstructPar 2>&1'"
-                )
-                if not _run_reconstruction_with_progress(
-                    container=container,
-                    command=reconstruct_cmd,
-                    description="final reconstructPar",
-                    simulation_directory=simulation_working_directory,
-                    maximum_time=None,
-                    status_callback=STATUS_CALLBACK,
-                ):
-                    return False
         else:
-            report_case_stage(STATUS_CALLBACK, "meshOnly", "solver skipped")
+            monitor_thread = threading.Thread(
+                target=run_convergence_monitor,
+                kwargs={
+                    "main_sim_folder": simulation_working_directory,
+                    "rpm": rpm_count,
+                    "avg_history_count": convergence_window_revolutions,
+                    "tolerance": convergence_tolerance,
+                    "convergence_mode": end_on_mode,
+                    "check_interval": convergence_check_interval,
+                    "timestep": timestep_str,
+                    "stop_event": monitor_stop_event,
+                    "status_callback": STATUS_CALLBACK,
+                },
+                name=f"{simulation_name}-convergence-monitor",
+                daemon=True,
+            )
 
-            if parallel_run:
-                reconstruct_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "reconstructPar > log.reconstructPar 2>&1'"
-                )
-                if not _run_reconstruction_with_progress(
-                    container=container,
-                    command=reconstruct_cmd,
-                    description="mesh reconstructPar",
-                    simulation_directory=simulation_working_directory,
-                    maximum_time=None,
-                    status_callback=STATUS_CALLBACK,
-                ):
-                    return False
+        monitor_thread.start()
+        report_case_stage(
+            STATUS_CALLBACK,
+            "solving",
+            f"solver started | {number_of_cores} core(s)",
+            progress=0.0 if end_on_mode == "time" else None,
+        )
 
-                check_mesh_after_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology -writeSets -setFormat vtk "
-                    "| tee log.checkMesh'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    check_mesh_after_cmd,
-                    "checkMesh after reconstruction",
-                    STATUS_CALLBACK,
-                    "checkMesh",
-                ):
-                    return False
+        if parallel_run:
+            sim_run_cmd = (
+                "bash -c '"
+                "set -o pipefail; "
+                "source /opt/openfoam13/etc/bashrc && "
+                f"mpirun --allow-run-as-root --use-hwthread-cpus -np {number_of_cores} "
+                "stdbuf -oL -eL foamRun -solver incompressibleFluid -parallel "
+                "2>&1 | stdbuf -oL tee log.pimpleFoam'"
+            )
+        else:
+            sim_run_cmd = (
+                "bash -c '"
+                "set -o pipefail; "
+                "source /opt/openfoam13/etc/bashrc && "
+                "stdbuf -oL -eL foamRun -solver incompressibleFluid "
+                "2>&1 | stdbuf -oL tee log.pimpleFoam'"
+            )
 
+        solver_successful = safe_exec(
+            container,
+            sim_run_cmd,
+            "OpenFOAM solver",
+            status_callback=STATUS_CALLBACK,
+        )
+
+        if monitor_stop_event is not None:
+            monitor_stop_event.set()
+        if monitor_thread is not None and monitor_thread.is_alive():
+            monitor_thread.join(timeout=10)
+
+        if not solver_successful:
+            return False
+
+        report_case_stage(STATUS_CALLBACK, "solving", "solver finished", progress=100.0)
+
+        if parallel_run:
+            reconstruct_cmd = (
+                "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                "reconstructPar > log.reconstructPar 2>&1'"
+            )
+            if not _run_reconstruction_with_progress(
+                container=container,
+                command=reconstruct_cmd,
+                description="final reconstructPar",
+                simulation_directory=simulation_working_directory,
+                maximum_time=None,
+                status_callback=STATUS_CALLBACK,
+            ):
+                return False
         # ------------------------------------------------------------------
         # Final bookkeeping / cleanup
         # ------------------------------------------------------------------

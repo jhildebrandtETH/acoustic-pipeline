@@ -17,15 +17,19 @@ A simulation order can contain multiple propeller geometries, RPM values, or par
 3. `surfaceFeatures`,
 4. `decomposePar` when more than one core is assigned,
 5. `snappyHexMesh` in serial or parallel,
-6. `checkMesh` and mesh diagnostics,
-7. AMI/NCC creation using `createNonConformalCouples`,
-8. optional field initialization from a lower-RPM case using `mapFields`,
-9. transient OpenFOAM solution using `foamRun -solver incompressibleFluid`,
-10. reconstruction and safe processor-folder cleanup,
-11. acoustic postprocessing,
-12. force/residual/y+ merging,
-13. SPL-spectrum generation, and
-14. PDF simulation-report generation.
+6. root-mesh reconstruction after parallel snappy when required,
+7. baseline `checkMesh`,
+8. optional cfMesh `generateBoundaryLayers` on the reconstructed root mesh,
+9. final OpenFOAM 13 `checkMesh` of the layered mesh,
+10. re-decomposition of the modified mesh when the case is parallel,
+11. AMI/NCC creation using `createNonConformalCouples`,
+12. optional field initialization from a lower-RPM case using `mapFields`,
+13. transient OpenFOAM solution using `foamRun -solver incompressibleFluid`,
+14. reconstruction and safe processor-folder cleanup,
+15. acoustic postprocessing,
+16. force/residual/y+ merging,
+17. SPL-spectrum generation, and
+18. PDF simulation-report generation.
 
 The scheduler runs several of these case workflows simultaneously whenever the available CPU budget allows it.
 
@@ -44,6 +48,9 @@ microfluidica/openfoam:13
 ```
 
 - the local `acousticSolver` package/submodule required by `acoustic_propagation.py`
+- **cfMesh 1.2.0 Linux binaries** when `--boundary-layers cfmesh` is used
+
+cfMesh runs **on the Linux host**, not inside the OpenFOAM Docker container. The official 1.2.0 binary package is self-contained and does not require an OpenFOAM environment to be sourced.
 
 A typical environment setup is:
 
@@ -57,6 +64,44 @@ docker info
 ```
 
 `docker info` must succeed before the pipeline is started.
+
+### cfMesh setup on Linux / server
+
+The repository includes:
+
+```bash
+bash setup_cfmesh.sh
+```
+
+By default this installs cfMesh 1.2.0 into:
+
+```text
+~/.local/cfmesh/cfMesh-1.2.0/
+```
+
+The pipeline automatically searches for:
+
+```text
+~/.local/cfmesh/cfMesh-1.2.0/bin/generateBoundaryLayers
+~/tools/cfmesh/cfMesh-1.2.0/bin/generateBoundaryLayers
+generateBoundaryLayers on PATH
+```
+
+A custom location can be supplied through:
+
+```bash
+export CFMESH_BIN=/path/to/generateBoundaryLayers
+```
+
+The cfMesh executable path is intentionally **not** stored in `simulation_order.json`; it is machine-specific setup. Only the selected boundary-layer method is stored with the simulation order. Detailed cfMesh layer settings remain part of the case dictionaries under `Parameters/` / `system/meshDict`.
+
+The current automated cfMesh integration targets **Linux**. On a Windows development machine, use:
+
+```bash
+--boundary-layers none
+```
+
+unless a compatible host-side cfMesh installation is configured manually.
 
 ### Linux Docker permissions
 
@@ -74,6 +119,7 @@ acoustic-pipeline/
 ├── tools.py
 ├── preprocessing.py
 ├── openfoamSimulation.py
+├── cfmesh.py
 ├── postprocessing.py
 ├── acoustic_propagation.py
 ├── createSimulationReport.py
@@ -82,6 +128,7 @@ acoustic-pipeline/
 ├── Core Template AMI - kEpsilon/
 ├── Core Template DES - kOmegaSST/
 ├── acousticSolver/
+├── setup_cfmesh.sh
 └── of_pipeline_env.yml
 ```
 
@@ -92,7 +139,8 @@ acoustic-pipeline/
 | `main.py` | CLI, simulation-order creation/resume, scheduler startup |
 | `tools.py` | scheduler, status dashboard, JSON persistence, monitors, OpenFOAM helpers, resume logic, report helpers |
 | `preprocessing.py` | prepares exactly one simulation case |
-| `openfoamSimulation.py` | executes the OpenFOAM lifecycle of exactly one case |
+| `openfoamSimulation.py` | executes the OpenFOAM lifecycle of exactly one case and coordinates the meshing-stage handoff |
+| `cfmesh.py` | runs cfMesh boundary-layer generation for exactly one reconstructed case |
 | `postprocessing.py` | coordinates acoustic postprocessing, merged data, and report generation |
 | `acoustic_propagation.py` | FW-H acoustic prediction and SPL spectrum |
 | `createSimulationReport.py` | creates the final PDF report |
@@ -165,6 +213,7 @@ python main.py \
   --turbulence DES \
   --total-cores 72 \
   --field-init off \
+  --boundary-layers cfmesh \
   --end-on time \
   --acoustic-surface impermeable
 ```
@@ -216,7 +265,27 @@ Example:
 → 34 + 33 + 33 cores
 ```
 
-The assigned core count is stored per case in `simulation_order.json` and is used consistently for `numberOfSubdomains`, meshing, AMI creation, and the solver.
+The assigned core count is stored per case in `simulation_order.json` and is used consistently for `numberOfSubdomains`, meshing, cfMesh, AMI creation, and the solver.
+
+For cfMesh, the same per-case allocation is enforced through OpenMP environment limits:
+
+```text
+OMP_NUM_THREADS=<allocated_cores>
+OMP_THREAD_LIMIT=<allocated_cores>
+OMP_DYNAMIC=FALSE
+OMP_MAX_ACTIVE_LEVELS=1
+```
+
+Example:
+
+```text
+24 SLURM cores / 8 simultaneous cases
+→ 3 cores per case
+→ each OpenFOAM case uses 3 ranks/cores
+→ each cfMesh generateBoundaryLayers process is limited to 3 threads
+```
+
+cfMesh never reads the total SLURM allocation directly. The scheduler's `allocated_cores` value remains the single source of truth for each case.
 
 ### Serial and MPI cases
 
@@ -326,7 +395,11 @@ blockMesh
 surfaceFeatures
 decomposePar
 snappyHexMesh
+reconstructPar
 checkMesh
+cfMesh
+checkMeshCfMesh
+decomposeParAfterCfMesh
 createNonConformalCouples
 mapFields
 solving
@@ -373,6 +446,7 @@ Detailed OpenFOAM output remains available in each case's `log.*` files even tho
 | `--total-cores` | integer ≥ 1 | required | total CPU budget for the complete order |
 | `--cores` | integer ≥ 1 | — | legacy alias for `--total-cores` |
 | `--field-init` | `on`, `off` | `off` | enable/disable same-geometry RPM initialization chains |
+| `--boundary-layers` | `cfmesh`, `none` | `cfmesh` | use cfMesh boundary layers or leave the snappy mesh unchanged |
 | `--end-on` | see below | `convergence` | condition used to terminate the CFD solver |
 | `--acoustic-surface` | `impermeable`, `permeable` | required for normal run | FW-H surface type |
 | `--acoustic-sphere-diameter` | float | `2.5` in permeable mode | permeable sphere diameter divided by propeller diameter |
@@ -388,7 +462,86 @@ Detailed OpenFOAM output remains available in each case's `log.*` files even tho
 
 ---
 
-# 10. Solver Termination: `--end-on`
+# 10. Boundary Layers with cfMesh
+
+The default boundary-layer method is:
+
+```bash
+--boundary-layers cfmesh
+```
+
+The case workflow is:
+
+```text
+blockMesh
+→ surfaceFeatures
+→ decomposePar                    [parallel]
+→ snappyHexMesh
+→ reconstructPar                 [parallel]
+→ checkMesh                      → log.checkMesh.snappy
+→ discard pre-cfMesh processor*
+→ host generateBoundaryLayers
+→ OpenFOAM 13 checkMesh          → log.checkMesh
+→ decomposePar                   [parallel]
+→ createNonConformalCouples
+→ solver
+```
+
+cfMesh is deliberately run **before** `createNonConformalCouples`. The standalone cfMesh runtime must never rewrite an already-created OpenFOAM 13 NCC mesh.
+
+The final mesh is always validated using **OpenFOAM 13**, even though boundary layers are generated by cfMesh.
+
+### cfMesh logs
+
+Each cfMesh case writes:
+
+```text
+system/meshDict
+log.generateBoundaryLayers
+log.checkMesh.snappy
+log.checkMesh
+```
+
+`log.checkMesh.snappy` is the pre-layer baseline. `log.checkMesh` is the final layered mesh and is the log used by the normal reporting utilities.
+
+### Layer settings
+
+Detailed cfMesh controls are intentionally **not CLI arguments**. The pipeline only decides whether cfMesh is used:
+
+```bash
+--boundary-layers cfmesh
+```
+
+Parameters such as `nLayers`, `thicknessRatio`, `maxFirstLayerThickness`, `allowDiscontinuity`, and patch-specific settings belong in the case configuration. `generateBoundaryLayers` reads `system/meshDict` directly. A clean template structure is, for example:
+
+```text
+Core Template .../
+└── system/
+    └── meshDict
+
+Parameters/
+└── cfMesh.cpp
+```
+
+where `system/meshDict` can include the shared parameter dictionary, for example:
+
+```cpp
+#include "../Parameters/cfMesh.cpp"
+```
+
+The Python pipeline does not create or overwrite these numerical layer settings. This keeps detailed meshing methodology version-controlled with the OpenFOAM/cfMesh dictionaries instead of exposing it through the user-facing CLI.
+
+To disable cfMesh completely:
+
+```bash
+--boundary-layers none
+```
+
+This is useful for raw snappy mesh development or on a machine where cfMesh is not installed.
+
+---
+
+# 11. Solver Termination: `--end-on`
 
 Available modes:
 
@@ -421,7 +574,7 @@ The detailed numerical convergence settings and residual slope bounds are implem
 
 ---
 
-# 11. Turbulence Models and Templates
+# 12. Turbulence Models and Templates
 
 The current AMI preprocessing maps turbulence selections to these templates:
 
@@ -437,7 +590,7 @@ For reproducible studies, changes to those templates should be version-controlle
 
 ---
 
-# 12. Acoustic Surface Options
+# 13. Acoustic Surface Options
 
 ## Impermeable
 
@@ -488,7 +641,7 @@ These values are currently code-level settings rather than CLI arguments and sho
 
 ---
 
-# 13. Resume
+# 14. Resume
 
 Resume an existing order with:
 
@@ -534,7 +687,7 @@ The order is then migrated to the new scheduler metadata.
 
 ---
 
-# 14. Parameter Studies
+# 15. Parameter Studies
 
 Study mode creates independent cases in which one parameter is varied.
 
@@ -599,7 +752,7 @@ Study cases are independent and are therefore scheduled for maximum throughput.
 
 ---
 
-# 15. Mesh-Only Mode
+# 16. Mesh-Only Mode
 
 Use:
 
@@ -607,7 +760,27 @@ Use:
 --mesh-only
 ```
 
-to perform meshing and mesh reconstruction without running the CFD solver or acoustic/report postprocessing.
+to perform the complete selected meshing workflow without creating NCCs, running the CFD solver, or starting acoustic/report postprocessing.
+
+With the default `--boundary-layers cfmesh`, mesh-only means:
+
+```text
+snappyHexMesh
+→ reconstructPar [parallel]
+→ checkMesh snappy baseline
+→ cfMesh generateBoundaryLayers
+→ OpenFOAM 13 final checkMesh
+→ sim.foam
+→ STOP
+```
+
+No `createNonConformalCouples` call is made.
+
+For a raw snappy-only mesh:
+
+```bash
+--mesh-only --boundary-layers none
+```
 
 Typical uses:
 
@@ -634,7 +807,7 @@ python main.py \
 
 ---
 
-# 16. `--allow-bad-mesh`
+# 17. `--allow-bad-mesh`
 
 Normally a case stops when `checkMesh` does not report:
 
@@ -652,7 +825,7 @@ This only bypasses the pipeline's stop decision. It does **not** make a poor-qua
 
 ---
 
-# 17. What Is Created for Each Case
+# 18. What Is Created for Each Case
 
 A case directory contains the prepared OpenFOAM case, logs, solver results, postprocessing output, and reports.
 
@@ -673,7 +846,11 @@ Typical structure:
 ├── log.surfaceFeatures
 ├── log.decomposePar
 ├── log.snappyHexMesh
+├── log.reconstructParMesh
+├── log.checkMesh.snappy          # cfMesh runs only
+├── log.generateBoundaryLayers    # cfMesh runs only
 ├── log.checkMesh
+├── log.decomposeParAfterCfMesh   # parallel cfMesh runs only
 ├── log.createNonConformalCouples
 ├── log.pimpleFoam
 ├── log.reconstructPar
@@ -694,7 +871,7 @@ After successful reconstruction, `processor*` folders are deleted only when the 
 
 ---
 
-# 18. `simulation_order.json`
+# 19. `simulation_order.json`
 
 `simulation_order.json` is the durable state of the complete batch.
 
@@ -709,6 +886,7 @@ total core budget
 per-case core allocation
 study settings
 acoustic settings
+boundary-layer method
 resume information
 errors / blocked dependencies
 ```
@@ -731,7 +909,7 @@ The live dashboard contains additional temporary information such as current sol
 
 ---
 
-# 19. Execution Model in One Diagram
+# 20. Execution Model in One Diagram
 
 ```text
                          TOTAL CPU BUDGET
@@ -746,10 +924,16 @@ The live dashboard contains additional temporary information such as current sol
          N_A cores        N_B cores        N_C cores
               │                │                │
               ▼                ▼                ▼
-          Docker A         Docker B         Docker C
+       OF13 Docker A    OF13 Docker B    OF13 Docker C
+              │                │                │
+      snappy/reconstruct   snappy/reconstruct   snappy/reconstruct
               │                │                │
               ▼                ▼                ▼
-          OpenFOAM A       OpenFOAM B       OpenFOAM C
+       host cfMesh A     host cfMesh B     host cfMesh C
+        N_A threads       N_B threads       N_C threads
+              │                │                │
+              ▼                ▼                ▼
+       OF13 NCC/solver   OF13 NCC/solver   OF13 NCC/solver
               │                │                │
               └────────────────┼────────────────┘
                                │
@@ -764,7 +948,7 @@ One case owns one case directory and one Docker container. The scheduler decides
 
 ---
 
-# 20. Common Errors
+# 21. Common Errors
 
 ### `simulation_order.json already exists`
 
@@ -822,14 +1006,34 @@ The CLI still exposes the legacy `MRF` choice, but the current preprocessing imp
 Inspect:
 
 ```text
+log.checkMesh.snappy
+log.generateBoundaryLayers
 log.checkMesh
 ```
 
 Use `--allow-bad-mesh` only when continuing despite that result is intentional.
 
+### `cfMesh generateBoundaryLayers executable was not found`
+
+Run:
+
+```bash
+bash setup_cfmesh.sh
+```
+
+or configure a custom installation:
+
+```bash
+export CFMESH_BIN=/path/to/generateBoundaryLayers
+```
+
+### cfMesh suddenly uses the whole node
+
+The pipeline does not launch cfMesh without limits. Each worker passes its stored `allocated_cores` to cfMesh through OpenMP limits. If cfMesh is launched manually from a shell, set `OMP_NUM_THREADS` / `OMP_THREAD_LIMIT` yourself.
+
 ---
 
-# 21. Recommended First Test After Code Changes
+# 22. Recommended First Test After Code Changes
 
 Before launching a large server order, run a small test with one or two geometries and a small number of RPM cases.
 
@@ -840,15 +1044,18 @@ Check that:
 3. separate Docker containers start for independent cases,
 4. the RUNNING and QUEUED tables behave correctly,
 5. case-local `log.*` files are written,
-6. completed cases release their scheduler slot,
-7. field-init dependencies behave as expected when enabled, and
-8. `--resume` can recover an intentionally interrupted test case.
+6. `log.generateBoundaryLayers` ends with `Writing mesh` and `End`,
+7. cfMesh thread usage matches each case's allocated core count,
+8. the final OF13 `checkMesh` evaluates the layered mesh,
+9. completed cases release their scheduler slot,
+10. field-init dependencies behave as expected when enabled, and
+11. `--resume` can recover an intentionally interrupted test case.
 
 Only then scale the same configuration to the full available core budget.
 
 ---
 
-# 22. Development Notes
+# 23. Development Notes
 
 Python bytecode/cache files should not be committed.
 
@@ -867,8 +1074,9 @@ When modifying the pipeline, preserve the current separation of responsibilities
 main.py                → user entry point / scheduler startup
 tools.py               → reusable infrastructure and helpers
 preprocessing.py       → prepare one case
-openfoamSimulation.py  → run one OpenFOAM case
-postprocessing.py      → postprocess one completed case
+openfoamSimulation.py  → run one OpenFOAM case / coordinate mesh handoffs
+cfmesh.py               → generate boundary layers for one case
+postprocessing.py       → postprocess one completed case
 ```
 
 This keeps the execution scripts readable while the reusable scheduling, monitoring, resume, parsing, and reporting logic remains centralized.
@@ -887,6 +1095,7 @@ python main.py \
   --turbulence <kOmegaSST|kEpsilon|DES> \
   --total-cores <total-available-cores> \
   --field-init off \
+  --boundary-layers cfmesh \
   --end-on <time|force_convergence|residual_convergence|convergence> \
   --acoustic-surface <impermeable|permeable>
 ```
@@ -901,6 +1110,7 @@ python main.py \
   --turbulence <kOmegaSST|kEpsilon|DES> \
   --total-cores <total-available-cores> \
   --field-init on \
+  --boundary-layers cfmesh \
   --end-on <time|force_convergence|residual_convergence|convergence> \
   --acoustic-surface <impermeable|permeable>
 ```

@@ -54,7 +54,7 @@ def create_simulation_report(
     yplus_plot, yplus_stats = create_yplus_distribution_plot(
         case_path,
         report_dir,
-        patch_name="cubeWall",
+        patch_name="propeller",
     )
 
 

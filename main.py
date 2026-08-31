@@ -9,6 +9,7 @@ from tools import find_source_stls
 from tools import initialize_runtime_queue_states
 from tools import load_simulation_order
 from tools import reactivate_failed_cases_for_resume
+from tools import resolve_cfmesh_executable
 from tools import run_parallel_scheduler
 from tools import save_simulation_order
 from tools import validate_acoustic_arguments
@@ -65,6 +66,16 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--mesh-only", action="store_true")
     parser.add_argument("--allow-bad-mesh", action="store_true")
+    parser.add_argument(
+        "--boundary-layers",
+        choices=["cfmesh", "none"],
+        default="cfmesh",
+        help=(
+            "Boundary-layer method. cfmesh: reconstruct the snappy mesh, run "
+            "host-side cfMesh generateBoundaryLayers, validate with OpenFOAM "
+            "13, then continue. none: keep the snappy mesh unchanged."
+        ),
+    )
     parser.add_argument(
         "--end-on",
         choices=[
@@ -152,6 +163,7 @@ def main() -> None:
         args.total_cores = int(order["total_cores"])
         args.mesh_only = order["mesh_only"]
         args.allow_bad_mesh = order["allow_bad_mesh"]
+        args.boundary_layers = order.get("boundary_layers", "none")
         args.turbulence = order["turbulence"]
         args.end_on = order["end_on"]
         args.acoustic_surface = order.get("acoustic_surface")
@@ -165,6 +177,12 @@ def main() -> None:
                 "The following meshes from simulation_order.json are missing "
                 "from STL/: " + ", ".join(missing_source_meshes)
             )
+
+        if args.boundary_layers == "cfmesh":
+            try:
+                resolve_cfmesh_executable()
+            except FileNotFoundError as error:
+                parser.error(str(error))
 
         order_store = SimulationOrderStore(simulations_directory)
         reactivate_failed_cases_for_resume(
@@ -208,6 +226,12 @@ def main() -> None:
                 "--field-init on requires RPM values in ascending order because "
                 "each case is initialized from the preceding RPM case."
             )
+
+        if args.boundary_layers == "cfmesh":
+            try:
+                resolve_cfmesh_executable()
+            except FileNotFoundError as error:
+                parser.error(str(error))
 
         validate_acoustic_arguments(parser, args)
 
@@ -259,6 +283,7 @@ def main() -> None:
         f"{('-' + str(order.get('max_cores_per_case'))) if order.get('max_cores_per_case', order['cores_per_case']) != order['cores_per_case'] else ''}\n"
         f"  max parallel cases: {order['max_parallel_cases']}\n"
         f"  field init        : {args.field_init}\n"
+        f"  boundary layers   : {args.boundary_layers}\n"
     )
 
     run_parallel_scheduler(

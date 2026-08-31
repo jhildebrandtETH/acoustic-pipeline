@@ -1,0 +1,22 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      meshDict;
+}
+
+#include "../Parameters/meshDict.cpp"
+
+boundaryLayers
+{
+    patchBoundaryLayers
+    {
+        propeller
+        {
+            nLayers                 $nLayers;
+            thicknessRatio          $thicknessRatio;
+            allowDiscontinuity      $allowDiscontinuity;
+        }
+    }
+}

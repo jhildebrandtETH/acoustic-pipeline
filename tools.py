@@ -1,9 +1,13 @@
 import os
+import shutil
+import subprocess
 import time
 import numpy as np
 import pandas as pd
 import re
+import signal
 import threading
+import traceback
 from pathlib import Path
 import json
 from decimal import Decimal, InvalidOperation
@@ -53,6 +57,37 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         os.fsync(handle.fileno())
 
     os.replace(tmp_path, path)
+
+
+def _write_pipeline_error_log(
+    simulations_directory: Path,
+    folder_name: str,
+    traceback_text: str,
+) -> Path | None:
+    """Persist a full worker traceback where it survives dashboard redraws."""
+    simulations_directory = Path(simulations_directory)
+    safe_folder = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(folder_name))
+    log_path = simulations_directory / f"{safe_folder}.pipeline_error.log"
+
+    try:
+        simulations_directory.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(str(traceback_text), encoding="utf-8")
+        return log_path
+    except OSError:
+        # Error reporting must never hide the original worker exception.
+        return None
+
+
+def _case_path_state(path: Path) -> str:
+    """Describe a case target without following a broken symlink away."""
+    path = Path(path)
+    if path.is_dir():
+        return "directory"
+    if path.is_symlink():
+        return "symlink"
+    if path.exists():
+        return "non-directory entry"
+    return "missing"
 
 
 # ============================================================================
@@ -143,6 +178,253 @@ def run_openfoam_command(
         )
 
     return success
+
+
+
+def resolve_cfmesh_executable(explicit_path=None) -> Path:
+    """
+    Resolve the host-side cfMesh generateBoundaryLayers executable.
+
+    Resolution order:
+      1. explicit_path argument,
+      2. CFMESH_BIN environment variable,
+      3. generateBoundaryLayers available on PATH,
+      4. default setup_cfmesh.sh installation under ~/.local/cfmesh.
+    """
+    candidates = []
+
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+
+    env_path = os.environ.get("CFMESH_BIN")
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    path_match = shutil.which("generateBoundaryLayers")
+    if path_match:
+        candidates.append(Path(path_match))
+
+    candidates.append(
+        Path.home()
+        / ".local"
+        / "cfmesh"
+        / "cfMesh-1.2.0"
+        / "bin"
+        / "generateBoundaryLayers"
+    )
+    candidates.append(
+        Path.home()
+        / "tools"
+        / "cfmesh"
+        / "cfMesh-1.2.0"
+        / "bin"
+        / "generateBoundaryLayers"
+    )
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            resolved = candidate.expanduser()
+
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+
+    searched = "\n  - ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "cfMesh generateBoundaryLayers executable was not found.\n"
+        "Run `bash setup_cfmesh.sh`, add generateBoundaryLayers to PATH, "
+        "or set CFMESH_BIN to the executable path.\n"
+        f"Searched:\n  - {searched}"
+    )
+
+
+def verify_openfoam_patch_exists(
+    simulation_directory: Path,
+    patch_name: str,
+) -> None:
+    """Fail early when the reconstructed root mesh does not contain a patch."""
+    boundary_file = (
+        Path(simulation_directory)
+        / "constant"
+        / "polyMesh"
+        / "boundary"
+    )
+
+    if not boundary_file.is_file():
+        raise FileNotFoundError(
+            f"OpenFOAM boundary file not found: {boundary_file}"
+        )
+
+    text = boundary_file.read_text(encoding="utf-8", errors="ignore")
+    pattern = rf"(?m)^\s*{re.escape(str(patch_name))}\s*$"
+
+    if re.search(pattern, text) is None:
+        raise ValueError(
+            f"Patch '{patch_name}' was not found in {boundary_file}. "
+            "The root mesh may not contain the reconstructed snappyHexMesh result."
+        )
+
+
+def prepare_case_for_cfmesh(
+    simulation_directory: Path,
+) -> None:
+    """
+    Prepare a fresh pre-solver OpenFOAM case for host-side cfMesh processing.
+
+    cfMesh configuration is intentionally owned by system/meshDict (which may
+    include files from Parameters/). The Python pipeline does not generate or
+    modify nLayers, thicknessRatio, patch settings, or other layer controls.
+
+    Diagnostic polyMesh/sets are disposable and can confuse older cfMesh
+    runtimes. 0/uniform/time is restart metadata and is also unnecessary before
+    the first solver run.
+    """
+    simulation_directory = Path(simulation_directory)
+
+    mesh_dict = simulation_directory / "system" / "meshDict"
+    if not mesh_dict.is_file():
+        raise FileNotFoundError(
+            f"cfMesh configuration not found: {mesh_dict}. "
+            "Provide system/meshDict in the case template; it may include "
+            "detailed settings from Parameters/."
+        )
+
+    sets_directory = (
+        simulation_directory
+        / "constant"
+        / "polyMesh"
+        / "sets"
+    )
+    if sets_directory.exists():
+        shutil.rmtree(sets_directory)
+
+    uniform_time = simulation_directory / "0" / "uniform" / "time"
+    try:
+        uniform_time.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def run_cfmesh_boundary_layer_process(
+    executable: Path,
+    simulation_directory: Path,
+    number_of_cores: int,
+    status_callback=None,
+) -> bool:
+    """
+    Run generateBoundaryLayers on the host with a strict per-case OpenMP limit.
+
+    The process inherits the SLURM cpuset from the Python worker, while the
+    OpenMP variables cap the cfMesh thread count to this case's allocation.
+    """
+    executable = Path(executable)
+    simulation_directory = Path(simulation_directory)
+    number_of_cores = int(number_of_cores)
+
+    if number_of_cores < 1:
+        raise ValueError("cfMesh number_of_cores must be at least 1")
+
+    log_path = simulation_directory / "log.generateBoundaryLayers"
+    env = os.environ.copy()
+    env.update(
+        {
+            "OMP_NUM_THREADS": str(number_of_cores),
+            "OMP_DYNAMIC": "FALSE",
+            "OMP_MAX_ACTIVE_LEVELS": "1",
+            "OMP_PROC_BIND": "close",
+            "OMP_PLACES": "cores",
+        }
+    )
+
+    report_case_stage(
+        status_callback,
+        "cfMesh",
+        f"generateBoundaryLayers running | {number_of_cores} thread(s)",
+    )
+
+    command = [
+        str(executable),
+        "-case",
+        str(simulation_directory),
+    ]
+    stdbuf_executable = shutil.which("stdbuf")
+    if stdbuf_executable:
+        command = [stdbuf_executable, "-oL", "-eL", *command]
+
+    try:
+        with log_path.open("w", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                command,
+                cwd=str(simulation_directory),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            return_code = process.wait()
+    except Exception as error:
+        message = f"cfMesh launch failed: {error}"
+        report_case_stage(
+            status_callback,
+            "cfMesh",
+            message,
+            error=message,
+        )
+        return False
+
+    if return_code != 0:
+        if return_code < 0:
+            signal_number = -return_code
+            try:
+                signal_name = signal.Signals(signal_number).name
+            except ValueError:
+                signal_name = "UNKNOWN"
+            message = (
+                "generateBoundaryLayers terminated by signal "
+                f"{signal_number} ({signal_name})"
+            )
+        else:
+            message = f"generateBoundaryLayers exited with code {return_code}"
+
+        try:
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write("\n\n" + "=" * 72 + "\n")
+                log_file.write("PIPELINE DETECTED cfMesh FAILURE\n")
+                log_file.write(f"{message}\n")
+                log_file.write("=" * 72 + "\n")
+        except OSError:
+            pass
+
+        report_case_stage(
+            status_callback,
+            "cfMesh",
+            message,
+            error=message,
+        )
+        return False
+
+    log_text = log_path.read_text(encoding="utf-8", errors="ignore")
+    if "Writing mesh" not in log_text or re.search(r"(?m)^\s*End\s*$", log_text) is None:
+        message = (
+            "generateBoundaryLayers returned zero but its log did not contain "
+            "the expected 'Writing mesh' / 'End' completion markers"
+        )
+        report_case_stage(
+            status_callback,
+            "cfMesh",
+            message,
+            error=message,
+        )
+        return False
+
+    report_case_stage(
+        status_callback,
+        "cfMesh",
+        "boundary-layer generation finished",
+        progress=100.0,
+    )
+    return True
 
 
 def remove_stale_stopped_container(
@@ -580,6 +862,11 @@ def ensure_scheduler_metadata(
 
     order["schema_version"] = 2
 
+    # Boundary-layer metadata was introduced after scheduler schema v2.
+    # Legacy orders keep their historical behavior unless the values were
+    # explicitly stored when the order was created.
+    order.setdefault("boundary_layers", "none")
+
     if any("depends_on" not in case for case in order.get("cases", [])):
         add_field_initialization_dependencies(
             order["cases"],
@@ -860,45 +1147,52 @@ def execute_simulation_case(
     callback = registry.callback_for(folder_name)
 
     simulation_path = simulations_directory / folder_name
-    simulation_path.mkdir(parents=True, exist_ok=True)
-
-    registry.update(
-        folder_name,
-        state="RUNNING",
-        stage="starting",
-        detail=f"worker started | {allocated_cores} core(s)",
-        progress=None,
-        error=None,
-    )
-
-    if mesh not in source_meshes:
-        error = (
-            f"Source mesh '{mesh}' was not found in {source_meshes_directory}"
-        )
-        order_store.mark_failed(folder_name, error, resume_status="pending")
-        registry.update(
-            folder_name,
-            state="FAILED",
-            stage="failed",
-            error=error,
-            detail=error,
-        )
-        return False
-
-    previous_simulation_path = (
-        simulations_directory / dependency
-        if dependency is not None
-        else None
-    )
-    use_previous_init = (
-        args.field_init == "on"
-        and dependency is not None
-        and not is_study_case
-    )
-
     status = order_store.case_status(folder_name)
 
+    # Do NOT pre-create simulation_path here. For a new case, preprocessing()
+    # owns creation of the case by copying the selected template with
+    # dirs_exist_ok=True. The previous unconditional mkdir was redundant and,
+    # on Windows-mounted WSL paths, could escape this worker's exception handler
+    # as FileExistsError before preprocessing had even started.
     try:
+        path_state = _case_path_state(simulation_path)
+        if path_state in {"symlink", "non-directory entry"}:
+            raise RuntimeError(
+                f"Case path cannot be used because it is a {path_state}: "
+                f"{simulation_path}"
+            )
+
+        if status != "pending" and not simulation_path.is_dir():
+            raise FileNotFoundError(
+                f"Cannot resume case '{folder_name}' from status '{status}' "
+                f"because its case directory is missing: {simulation_path}"
+            )
+
+        registry.update(
+            folder_name,
+            state="RUNNING",
+            stage="starting",
+            detail=f"worker started | {allocated_cores} core(s)",
+            progress=None,
+            error=None,
+        )
+
+        if mesh not in source_meshes:
+            raise FileNotFoundError(
+                f"Source mesh '{mesh}' was not found in {source_meshes_directory}"
+            )
+
+        previous_simulation_path = (
+            simulations_directory / dependency
+            if dependency is not None
+            else None
+        )
+        use_previous_init = (
+            args.field_init == "on"
+            and dependency is not None
+            and not is_study_case
+        )
+
         while status != "postprocessing_done":
             # --------------------------------------------------------------
             # PREPROCESSING
@@ -972,6 +1266,7 @@ def execute_simulation_case(
                     NUMBER_OF_CORES=allocated_cores,
                     MESH_ONLY=args.mesh_only,
                     ALLOW_BAD_MESH=args.allow_bad_mesh,
+                    BOUNDARY_LAYER_METHOD=args.boundary_layers,
                     STATUS_CALLBACK=callback,
                 )
 
@@ -1078,6 +1373,7 @@ def execute_simulation_case(
                     NUMBER_OF_CORES=allocated_cores,
                     MESH_ONLY=args.mesh_only,
                     ALLOW_BAD_MESH=args.allow_bad_mesh,
+                    BOUNDARY_LAYER_METHOD=args.boundary_layers,
                     STATUS_CALLBACK=callback,
                 )
 
@@ -1166,6 +1462,13 @@ def execute_simulation_case(
         return True
 
     except Exception as error:
+        full_traceback = traceback.format_exc()
+        error_log = _write_pipeline_error_log(
+            simulations_directory,
+            folder_name,
+            full_traceback,
+        )
+
         if status == "solver_done":
             resume_status = "solver_done"
         elif status == "solver_running":
@@ -1177,17 +1480,27 @@ def execute_simulation_case(
         else:
             resume_status = "pending"
 
+        error_text = f"{type(error).__name__}: {error}"
+        if error_log is not None:
+            error_text += f" | traceback: {error_log}"
+
         order_store.mark_failed(
             folder_name,
-            error=str(error),
+            error=error_text,
             resume_status=resume_status,
         )
+        if error_log is not None:
+            order_store.update_case(
+                folder_name,
+                error_log=str(error_log),
+            )
+
         registry.update(
             folder_name,
             state="FAILED",
             stage="failed",
-            detail=str(error),
-            error=str(error),
+            detail=error_text,
+            error=error_text,
             progress=None,
         )
         return False
@@ -1236,19 +1549,37 @@ def run_parallel_scheduler(
                     try:
                         future.result()
                     except Exception as error:
-                        # _execute_case is defensive, but keep the scheduler alive
-                        # even if an unexpected worker exception escapes.
+                        # This is a last-resort guard. execute_simulation_case()
+                        # should normally capture its own failures, but any error
+                        # that escapes still gets a persistent full traceback.
+                        full_traceback = traceback.format_exc()
+                        error_log = _write_pipeline_error_log(
+                            simulations_directory,
+                            folder,
+                            full_traceback,
+                        )
+                        error_text = (
+                            f"Unhandled worker error: {type(error).__name__}: {error}"
+                        )
+                        if error_log is not None:
+                            error_text += f" | traceback: {error_log}"
+
                         order_store.mark_failed(
                             folder,
-                            error=f"Unhandled worker error: {error}",
+                            error=error_text,
                             resume_status="pending",
                         )
+                        if error_log is not None:
+                            order_store.update_case(
+                                folder,
+                                error_log=str(error_log),
+                            )
                         registry.update(
                             folder,
                             state="FAILED",
                             stage="failed",
-                            detail=f"Unhandled worker error: {error}",
-                            error=str(error),
+                            detail=error_text,
+                            error=error_text,
                         )
 
                     del running_futures[future]
@@ -2311,6 +2642,7 @@ def create_simulation_order(args, simulations_directory: Path):
         "mesh_only": args.mesh_only,
         "end_on": args.end_on,
         "allow_bad_mesh": args.allow_bad_mesh,
+        "boundary_layers": args.boundary_layers,
         "study": args.study,
         "study_file": getattr(args, "study_file", None),
         "study_parameter": getattr(args, "study_parameter", None),

@@ -1,6 +1,6 @@
 castellatedMesh true;
 snap true;
-addLayers false;
+addLayers false; // OBSERVE CFMESH CONFIG
 
 maxLocalCells 100000;
 maxGlobalCells 3000000;
