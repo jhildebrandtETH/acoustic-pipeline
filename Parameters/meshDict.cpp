@@ -1,3 +1,3 @@
-nLayers 3;
-thicknessRatio 1.2;
+nLayers 6;
+thicknessRatio 1.1;
 allowDiscontinuity 0;

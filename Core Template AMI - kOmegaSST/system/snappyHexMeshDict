@@ -64,7 +64,19 @@ geometry
             }
         }
     }
-
+    permeableSurface.stl
+    {
+        type        triSurfaceMesh;
+        file        "permeableSurface.stl";
+        name        acousticSurface;
+        regions
+        {
+            patch0
+            {
+                name    acousticSurface;
+            }
+        }
+    }
     propeller.stl
     {
         type        triSurfaceMesh;
@@ -221,6 +233,11 @@ castellatedMeshControls
         {
             mode        $outerCylinderRefinementRegionMode;
             levels      $outerCylinderRefinementRegionLevel;
+        }
+        acousticSurface
+        {
+            mode        $acousticSurfaceRefinementRegionMode;
+            levels      $acousticSurfaceRefinementRegionLevel;
         }
         
         

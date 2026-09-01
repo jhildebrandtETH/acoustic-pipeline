@@ -191,11 +191,11 @@ def preprocessing(
     rotary_cylinder.apply_transform(rotation)
     rotary_cylinder.export(tri_surface_path / "rotaryCylinder.stl")
 
-    wake_offset = -0.1
+    wake_offset = -0.12 * acoustic_sphere_radius
 
     inner_cylinder = trimesh.creation.cylinder(
-        radius=0.2,
-        height=0.5,
+        radius=0.6 * acoustic_sphere_radius,
+        height=0.52 * acoustic_sphere_radius,
         sections=128,
     )
     inner_cylinder.apply_transform(rotation)
@@ -203,8 +203,8 @@ def preprocessing(
     inner_cylinder.export(tri_surface_path / "innerCylinder.stl")
 
     outer_cylinder = trimesh.creation.cylinder(
-        radius=0.25,
-        height=0.6,
+        radius=0.8 * acoustic_sphere_radius,
+        height=0.72 * acoustic_sphere_radius,
         sections=128,
     )
     outer_cylinder.apply_transform(rotation)

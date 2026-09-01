@@ -20,10 +20,13 @@ rotaryRegionRefinementRegionMode inside;
 rotaryRegionRefinementRegionLevel ((1E15 3));
 
 innerCylinderRefinementRegionMode inside;
-innerCylinderRefinementRegionLevel ((1E15 2));
+innerCylinderRefinementRegionLevel ((1E15 3));
 
 outerCylinderRefinementRegionMode inside;
 outerCylinderRefinementRegionLevel ((1E15 2));
+
+acousticSurfaceRefinementRegionMode inside;
+acousticSurfaceRefinementRegionLevel ((1E15 2));
 
 
 nSmoothPatch 3;
