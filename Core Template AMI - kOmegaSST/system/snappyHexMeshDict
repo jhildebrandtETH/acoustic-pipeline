@@ -11,6 +11,7 @@ FoamFile
 
 
 
+// Baseline: pipeline --boundary-layers none; snappyHexMesh adds the layers.
 // Which of the steps to run
 castellatedMesh $castellatedMesh;
 snap            $snap;
@@ -23,6 +24,14 @@ addLayers       $addLayers;
 // - to specify refinement for any mesh cell intersecting it
 // - to specify refinement for any mesh cell inside/outside/near
 // - to 'snap' the mesh boundary to the surface
+
+
+writeFlags
+(
+    layerSets
+    layerFields
+);
+
 geometry
 {
     rotaryCylinder.stl
@@ -140,7 +149,11 @@ castellatedMeshControls
     // This is a featureEdgeMesh, read from constant/triSurface for now.
     features
     (
-      
+        // Baseline for cfMesh boundary-layer study:
+        // explicit feature refinement intentionally disabled.
+        //
+        // Re-enable these entries later for the dedicated feature-refinement study.
+        /*
         {
             file        "propeller.eMesh";
             level       4;
@@ -161,6 +174,8 @@ castellatedMeshControls
                 (0.003 6)
             );
         }
+        */
+
 
     );
 
@@ -314,10 +329,10 @@ addLayersControls
         }
     }
 
+    // Specify exactly two thickness controls: expansion and final thickness.
+    // With relativeSizes true, finalLayerThickness scales with the local cell.
     expansionRatio      $expansionRatio;
-    firstLayerThickness $firstLayerThickness;
-    // optional:
-    // thickness        0.003;     // ~3 mm total, if you want to cap it
+    finalLayerThickness $finalLayerThickness;
 
     minThickness        $minThickness;
     nGrow               $nGrow;
@@ -334,7 +349,10 @@ addLayersControls
     minMedialAxisAngle        $minMedialAxisAngle;
 
     nLayerIter           $nLayerIter;
+    // Keep the normal quality limits for every layer iteration.
+    nRelaxedIter         $nLayerIter;
     nBufferCellsNoExtrude $nBufferCellsNoExtrude;
+    mergeFaces false;
 }
 
 
@@ -368,7 +386,7 @@ meshQualityControls
     //     <0 = inside out tet,
     //      0 = flat tet
     //      1 = regular tet
-    minTetQuality -1; // 1e-30;
+    minTetQuality 1e-30; // 1e-30;
 
     //- Minimum face area. Set to <0 to disable.
     minArea -1;

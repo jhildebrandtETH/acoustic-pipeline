@@ -1,7 +1,7 @@
 deltaT 1.2e-08;
 startFrom latestTime;
 startTime 0;
-endTime 0.2;
+endTime 0.3;
 maxDeltaT 1e-5;
 writeInterval 200;
 purgeWrite 200;

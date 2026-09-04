@@ -146,6 +146,18 @@ def openfoamSimulation(
                 return False
 
             if parallel_run:
+                clear_initial_sets_cmd = (
+                    "bash -c 'rm -rf constant/polyMesh/sets'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    clear_initial_sets_cmd,
+                    "clear stale mesh sets before initial decomposition",
+                    STATUS_CALLBACK,
+                    "decomposeParPrep",
+                ):
+                    return False
+
                 decompose_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
                     "decomposePar -copyZero > log.decomposePar 2>&1'"
@@ -223,7 +235,7 @@ def openfoamSimulation(
 
             # Keep a separate snappy baseline when cfMesh is enabled. The
             # baseline check deliberately does not write sets because cfMesh
-            # should receive a clean root mesh.
+            # should receive a clean reconstructed root mesh.
             if boundary_layer_method == "cfmesh":
                 check_mesh_log_name = "log.checkMesh.snappy"
                 check_mesh_cmd = (
@@ -232,16 +244,38 @@ def openfoamSimulation(
                     "| tee log.checkMesh.snappy'"
                 )
             elif MESH_ONLY:
+                # Mesh-only cases have already reconstructed the parallel
+                # snappy mesh to constant/polyMesh above. Run diagnostics on
+                # that root mesh and write VTK surfaces/sets so the failed
+                # checkMesh regions can be inspected directly in ParaView.
                 check_mesh_log_name = "log.checkMesh"
                 check_mesh_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology | tee log.checkMesh'"
+                    "checkMesh -allGeometry -allTopology "
+                    "-writeSurfaces -surfaceFormat vtk "
+                    "-writeSets -setFormat vtk "
+                    "| tee log.checkMesh'"
+                )
+            elif parallel_run:
+                # Normal non-mesh-only snappy path: validate the actual
+                # decomposed processor meshes directly without reconstructing.
+                check_mesh_log_name = "log.checkMesh"
+                check_mesh_cmd = (
+                    "bash -c '"
+                    "set -o pipefail; "
+                    "source /opt/openfoam13/etc/bashrc && "
+                    f"mpirun --allow-run-as-root --use-hwthread-cpus "
+                    f"-np {number_of_cores} "
+                    "checkMesh -parallel -allGeometry -allTopology "
+                    "2>&1 | tee log.checkMesh'"
                 )
             else:
                 check_mesh_log_name = "log.checkMesh"
                 check_mesh_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology -writeSets -setFormat vtk "
+                    "checkMesh -allGeometry -allTopology "
+                    "-writeSurfaces -surfaceFormat vtk "
+                    "-writeSets -setFormat vtk "
                     "| tee log.checkMesh'"
                 )
 
@@ -291,6 +325,93 @@ def openfoamSimulation(
                     number_of_cores=number_of_cores,
                     status_callback=STATUS_CALLBACK,
                 ):
+                    return False
+
+                # cfMesh/polyMeshGen rewrites constant/polyMesh and removes
+                # OpenFOAM zones. Recreate the rotating disconnected region
+                # as the cellZone required by the rotor motion solver.
+                topo_set_dict_path = (
+                    simulation_working_directory / "system" / "topoSetDict"
+                )
+                topo_set_dict_path.write_text(
+                    """FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      topoSetDict;
+}
+
+actions
+(
+    {
+        name    rotaryRegionCells;
+        type    cellSet;
+        action  new;
+
+        source  regionToCell;
+        sourceInfo
+        {
+            insidePoints ((0.1 0 0));
+            nErode 0;
+        }
+    }
+
+    {
+        name    rotaryRegion;
+        type    cellZoneSet;
+        action  new;
+
+        source  setToCellZone;
+        sourceInfo
+        {
+            set rotaryRegionCells;
+        }
+    }
+);
+""",
+                    encoding="utf-8",
+                )
+
+                restore_rotary_zone_cmd = (
+                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                    "topoSet > log.restoreRotaryRegion 2>&1'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    restore_rotary_zone_cmd,
+                    "restore rotaryRegion cellZone",
+                    STATUS_CALLBACK,
+                    "restoreRotaryRegion",
+                ):
+                    return False
+
+                rotary_zone_path = (
+                    simulation_working_directory
+                    / "constant"
+                    / "polyMesh"
+                    / "cellZones"
+                )
+                try:
+                    rotary_zone_text = rotary_zone_path.read_text(
+                        encoding="utf-8",
+                        errors="ignore",
+                    )
+                except OSError as error:
+                    report_case_stage(
+                        STATUS_CALLBACK,
+                        "restoreRotaryRegion",
+                        f"could not read {rotary_zone_path}: {error}",
+                        error="rotaryRegion cellZone verification failed",
+                    )
+                    return False
+
+                if "rotaryRegion" not in rotary_zone_text:
+                    report_case_stage(
+                        STATUS_CALLBACK,
+                        "restoreRotaryRegion",
+                        "rotaryRegion was not recreated after cfMesh",
+                        error="rotaryRegion cellZone missing after cfMesh",
+                    )
                     return False
 
                 # Final mesh validation is always performed by OpenFOAM 13,
@@ -364,6 +485,18 @@ def openfoamSimulation(
             # intentionally discarded before layer generation. Re-decompose
             # the final layered root mesh before NCC and the solver continue.
             if boundary_layer_method == "cfmesh" and parallel_run:
+                clear_stale_sets_cmd = (
+                    "bash -c 'rm -rf constant/polyMesh/sets'"
+                )
+                if not run_openfoam_command(
+                    container,
+                    clear_stale_sets_cmd,
+                    "clear stale mesh sets",
+                    STATUS_CALLBACK,
+                    "decomposeParAfterCfMeshPrep",
+                ):
+                    return False
+
                 decompose_layered_cmd = (
                     "bash -c 'source /opt/openfoam13/etc/bashrc && "
                     "decomposePar -copyZero > log.decomposeParAfterCfMesh 2>&1'"
@@ -374,28 +507,6 @@ def openfoamSimulation(
                     "decompose layered mesh",
                     STATUS_CALLBACK,
                     "decomposeParAfterCfMesh",
-                ):
-                    return False
-
-            # Preserve the existing diagnostic cell-set conversion only for
-            # the legacy snappy-only path. cfMesh diagnostics are already
-            # written by the final OpenFOAM-13 checkMesh above.
-            if boundary_layer_method == "none":
-                vtk_cell_sets_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "for cell_set in underdeterminedCells oneInternalFaceCells "
-                    "twoInternalFacesCells; do "
-                    "if [ -f constant/polyMesh/sets/$cell_set ]; then "
-                    "foamToVTK -constant -cellSet $cell_set; "
-                    "fi; "
-                    "done'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    vtk_cell_sets_cmd,
-                    "foamToVTK cell-set conversion",
-                    STATUS_CALLBACK,
-                    "meshDiagnostics",
                 ):
                     return False
 

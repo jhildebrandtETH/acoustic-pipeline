@@ -1,20 +1,19 @@
 castellatedMesh true;
 snap true;
-addLayers false; // OBSERVE CFMESH CONFIG
+addLayers true;
 
 maxLocalCells 100000;
 maxGlobalCells 3000000;
 minRefinementCells 0;
 maxLoadUnbalance 0.10;
-nCellsBetweenLevels 2;
+nCellsBetweenLevels 3;
 
 rotaryRegionSurfaceRefinementLevel (3 3);
 
-propellerSurfaceRefinementLevel (5 5);// y+ targeting variable
-
+propellerSurfaceRefinementLevel (6 6); // Uniform propeller surface refinement.
 
 propellerRefinementRegionMode distance;
-propellerRefinementRegionLevel ((0.003 5) (0.01 4));
+propellerRefinementRegionLevel ((0.0045 6) (0.0125 5));
 
 rotaryRegionRefinementRegionMode inside;
 rotaryRegionRefinementRegionLevel ((1E15 3));
@@ -28,33 +27,35 @@ outerCylinderRefinementRegionLevel ((1E15 2));
 acousticSurfaceRefinementRegionMode inside;
 acousticSurfaceRefinementRegionLevel ((1E15 2));
 
-
 nSmoothPatch 3;
 tolerance 1.0;
 nSolveIter 30;
 nRelaxIter 20;
-nFeatureSnapIter 10;
-implicitFeatureSnap true;
-explicitFeatureSnap true;
-multiRegionFeatureSnap true;
+nFeatureSnapIter 0;
+implicitFeatureSnap false;
+explicitFeatureSnap false;
+multiRegionFeatureSnap false;
 
-
+// Native snappyHexMesh layers with absolute dimensions in metres.
+// Three layers with expansionRatio 1.2 give approximately:
+// first layer = 0.153 mm, final layer = 0.220 mm,
+// total layer stack = 0.556 mm where all three layers are retained.
 relativeSizes false;
 propellerTipSurfaceLayers 3;
-expansionRatio 1.0;
-firstLayerThickness 0.001; // y+ targting variable
-minThickness 0.0002;
+expansionRatio 1.2;
+finalLayerThickness 2.2e-4;
+minThickness 7.0e-5;
 nGrow 0;
-featureAngle 180;
+featureAngle 60;
 addLayersnRelaxIter 5;
-nSmoothSurfaceNormals 5; //1
-nSmoothNormals 10; //3
-nSmoothThickness 30; //20
-maxFaceThicknessRatio 5.0; // 2.0
-maxThicknessToMedialRatio 2.0; //1.0
-minMedialAxisAngle 15; //30
-nLayerIter 100; //50
-nBufferCellsNoExtrude 0;
+nSmoothSurfaceNormals 3;
+nSmoothNormals 3;
+nSmoothThickness 10;
+maxFaceThicknessRatio 0.5;
+maxThicknessToMedialRatio 0.2;
+minMedialAxisAngle 90;
+nLayerIter 100;
+nBufferCellsNoExtrude 1;
 
 maxNonOrtho 65;
 maxBoundarySkewness 4;

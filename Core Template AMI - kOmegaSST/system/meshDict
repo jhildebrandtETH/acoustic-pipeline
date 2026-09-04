@@ -17,6 +17,21 @@ boundaryLayers
             nLayers                 $nLayers;
             thicknessRatio          $thicknessRatio;
             allowDiscontinuity      $allowDiscontinuity;
+            maxFirstLayerThickness  $maxFirstLayerThickness;
         }
     }
+
+    optimiseLayer 1;
+
+    optimisationParameters
+    {
+        nSmoothNormals      10;
+        maxNumIterations    10;
+        featureSizeFactor   0.2;
+        recalculateNormals  1;
+        relThicknessTol     0.15;
+    }
+
+    // The installed binary always performs layer untangling and does not
+    // contain a runtime parser for the source-release key untangleLayers.
 }
