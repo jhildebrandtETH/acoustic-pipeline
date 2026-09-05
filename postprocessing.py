@@ -1,5 +1,6 @@
 from acoustic_propagation import run_acoustic_solver
 from createSimulationReport import create_simulation_report
+from visualization import run_visualization
 from tools import MATPLOTLIB_LOCK
 from tools import emit_status
 from tools import merge_postprocessing_dat_files
@@ -36,6 +37,13 @@ def postprocessing(
     merge_postprocessing_dat_files(SIMULATION_WORKING_DIRECTORY, "forcesBlades", quiet=True)
     merge_postprocessing_dat_files(SIMULATION_WORKING_DIRECTORY, "residuals", quiet=True)
     merge_postprocessing_dat_files(SIMULATION_WORKING_DIRECTORY, "yPlus", quiet=True)
+
+    run_visualization(
+        ACOUSTIC_SURFACE,
+        SIMULATION_WORKING_DIRECTORY,
+        RPM_COUNT,
+        STATUS_CALLBACK=STATUS_CALLBACK,
+    )
 
     emit_status(
         STATUS_CALLBACK,

@@ -153,12 +153,12 @@ castellatedMeshControls
         // explicit feature refinement intentionally disabled.
         //
         // Re-enable these entries later for the dedicated feature-refinement study.
-        /*
+        
         {
             file        "propeller.eMesh";
             level       4;
         }
-
+        /*
         {
             file        "propeller_other.obj";
             levels

@@ -28,8 +28,9 @@ A simulation order can contain multiple propeller geometries, RPM values, or par
 14. reconstruction and safe processor-folder cleanup,
 15. acoustic postprocessing,
 16. force/residual/y+ merging,
-17. SPL-spectrum generation, and
-18. PDF simulation-report generation.
+17. SPL-spectrum generation,
+18. server-side ParaView visual-atlas generation, and
+19. PDF simulation-report generation, including the visual atlas.
 
 The scheduler runs several of these case workflows simultaneously whenever the available CPU budget allows it.
 
@@ -122,6 +123,7 @@ acoustic-pipeline/
 ├── cfmesh.py
 ├── postprocessing.py
 ├── acoustic_propagation.py
+├── visualization.py
 ├── createSimulationReport.py
 ├── Parameters/
 ├── Core Template AMI - kOmegaSST/
@@ -143,6 +145,7 @@ acoustic-pipeline/
 | `cfmesh.py` | runs cfMesh boundary-layer generation for exactly one reconstructed case |
 | `postprocessing.py` | coordinates acoustic postprocessing, merged data, and report generation |
 | `acoustic_propagation.py` | FW-H acoustic prediction and SPL spectrum |
+| `visualization.py` | independent server-side ParaView visual-atlas stage |
 | `createSimulationReport.py` | creates the final PDF report |
 
 The individual workflow scripts intentionally contain only their main public function. Reusable helper logic is centralized in `tools.py`.
@@ -869,6 +872,10 @@ Some files are only present when the corresponding stage was executed.
 
 After successful reconstruction, `processor*` folders are deleted only when the pipeline's reconstruction-integrity checks pass. If validation fails, processor data is deliberately preserved for recovery and manual inspection.
 
+Cleanup verifies every saved processor timestep against the reconstructed case, including the required solver fields and any additional volume, surface, or point fields written by the processors. `purgeWrite` is a maximum retention count, so a successful run can have fewer saved timesteps than that setting; `purgeWrite 0` checks all saved output. Optional fields such as `Uf`, `Q`, and `vorticity` are required when present in processor output. Compressed `.gz` fields are supported. Resume validation covers the reconstructed history through the selected safe timestep.
+
+The result is saved in `log.processor_cleanup_check`. When processor folders are preserved, this file identifies the missing timestep or field, or the failed field-structure check. These are basic file-structure checks following a successful `reconstructPar`, not a numerical validation of the solution.
+
 ---
 
 # 19. `simulation_order.json`
@@ -1082,6 +1089,174 @@ postprocessing.py       → postprocess one completed case
 This keeps the execution scripts readable while the reusable scheduling, monitoring, resume, parsing, and reporting logic remains centralized.
 
 ---
+
+## Scientific visual atlas
+
+`postprocessing.py` calls `run_visualization()` from `visualization.py` after
+acoustic processing and data merging, before creating the PDF. All visualization
+helpers are grouped in the **PARAVIEW VISUALIZATION STAGE / SCIENTIFIC VISUAL
+ATLAS** section at the end of `tools.py`. Rendering runs in a separate ParaView
+process on the simulation host. There is no full-case transfer to the client and
+no automatic deletion of fields, acoustic samples, caches or old visual runs.
+
+### Host setup
+
+Install a native ParaView distribution on the simulation server. This stage was
+tested with ParaView 6.1 on Windows; the Linux server build must support headless
+rendering (EGL or OSMesa as appropriate to that host). OpenFOAM 13 reader/NCC
+compatibility and available memory still need verification on a real server
+case. ParaView is a separate runtime, not a `pip install paraview` dependency.
+
+Set an absolute executable path, or put `pvpython` / `pvbatch` on `PATH`:
+
+```bash
+export PARAVIEW_EXECUTABLE=/opt/ParaView/bin/pvpython
+```
+
+The stage passes `--disable-registry --force-offscreen-rendering` and uses the
+ParaView Python environment, without requiring pandas, Torch or ReportLab inside
+that environment. The pipeline environment still needs its existing dependencies.
+On Windows, installed `Program Files/ParaView*/bin/pvpython.exe` paths are also
+discovered automatically. Rendering jobs are serialized within one pipeline
+process, separately from the Matplotlib lock. Default VTK/OpenMP thread limit: 2.
+One volume time plus its derived fields must fit in the rendering process's RAM;
+the archive's total size is not its peak rendering memory requirement.
+
+### Initial view catalogue
+
+The defaults produce roughly two hundred large figures when all fields and
+requested saved times are available. No image-count or PDF-size cap is applied.
+
+| Family | Views / interpretation |
+|---|---|
+| Acoustic geometry | Original integration-surface mesh from two directions; observer location; permeable-surface enclosure view with blade geometry when the STL is available |
+| Surface pressure | Views from +y and -y at up to 12 saved times over the final revolution; common scale across these views |
+| Surface velocity | Saved laboratory-frame fluid speed; explicitly distinguished from blade-relative velocity |
+| Temporal surface statistics | Mean pressure, fluctuation RMS and pressure-change RMS, each from three directions |
+| Signed loading departures | Pressure minus each panel's temporal mean, from both sides at the selected times |
+| Flow slices | Two planes containing the rotor axis and six rotor-normal stations at signed y/D = -1, -0.5, 0, 0.5, 1, 2 |
+| Transient wake | Speed, pressure and vorticity slices at up to four saved times in the final revolution |
+| Final flow state | Additional axial-velocity, turbulent-kinetic-energy and cell-Courant-number slices |
+| Vortex structures | Q/omega² = 0.1, 0.5 and 1.0, viewed from two directions at the selected volume times; colored by speed |
+| Blade wall / mesh | Native patch pressure, y+, saved wall-shear magnitude, blade surface mesh and rotor-region mesh sections |
+
+Each PDF figure occupies one landscape page with physical coordinate labels,
+units, a color legend, time/phase where applicable, data extrema and an explanatory
+caption. Original-resolution PNGs (3000 × 1800 by default) remain available outside
+the PDF. Cell fields retain their native association; contour extraction alone
+interpolates Q and speed to points. Saved Q/vorticity are used when available;
+otherwise ParaView computes them from the saved velocity gradient.
+
+### Scientific assumptions and retained evidence
+
+- Rotation follows the current pipeline convention: origin `(0, 0, 0)`, axis
+  `+y`, positive supplied RPM. Phase is `omega*t modulo 360°` relative to solver
+  time zero. Saved times are selected without interpolation or duplicated frames;
+  sparse output cannot resolve a missing transient event.
+- Pressure units come from the OpenFOAM field's `dimensions`, including compressed
+  fields. Incompressible kinematic `p` is labeled **m²/s²**, not Pa. No density or
+  reference-pressure conversion is guessed. Unknown units are explicitly marked.
+- Surface statistics stream **all saved samples in the final five revolutions**
+  with trapezoidal physical-time weights. RMS removes each panel's temporal mean.
+  Pressure-change RMS uses interval first differences and is cadence-sensitive.
+  The actual window, number of samples and minimum/maximum spacing are retained.
+- Statistics check topology and point correspondence for every sample. Blade
+  panels must follow the prescribed rigid rotation; permeable panels must remain
+  stationary. Inconsistent geometry withholds temporal maps instead of averaging
+  unrelated panels. Original sampled geometry is used, not the acoustic solver's
+  geometry-replacement copies. Volume fields are not averaged across moving cells.
+- These are CFD/source-surface diagnostics, **not far-field acoustic pressure,
+  SPL, an FW-H contribution decomposition, or proof of acoustic convergence**.
+  RMS cannot retain phase or cancellation information. Steady loading on rotating
+  panels can still radiate tonal noise; low rotating-frame RMS does not imply
+  low sound. The existing observer
+  spectrum remains the acoustic prediction. The default observer matches the
+  current acoustic solver's `(1, 0, 0)` m position.
+- Color scales share full extrema within comparison families for a case. Use
+  explicit `color_ranges` for comparisons between cases; clipped extrema remain
+  documented. Vortex thresholds are normalized by angular velocity squared.
+- Mesh views are diagnostic images, not new quantitative mesh-quality or
+  boundary-layer certification. Inspect them alongside existing `checkMesh` and
+  wall-treatment results.
+
+Outputs live under each case's `report/visuals/`:
+
+```text
+manifest.json                 current run status, coverage notes and image index
+<unique-run>/settings.json    exact requested configuration
+<unique-run>/render_visuals.py  standalone worker built from the tools.py helpers
+<unique-run>/paraview.log     renderer output and tracebacks
+<unique-run>/result.json      incremental rendering results and metadata
+<unique-run>/view_*.png       original-resolution figures
+<unique-run>/surface_statistics.vtp   compact panel statistics and reference mesh
+<unique-run>/surface_statistics.json  statistics window, units and provenance
+```
+
+Missing software, fields, unsupported geometry or failed/empty views are recorded
+in the manifest and the PDF coverage pages. A failed rerun gets a new directory
+and cannot silently reuse figures from an older run. By default a partial or
+failed atlas does not prevent the rest of the simulation report; set
+`required: true` to make anything short of complete visualization fail the
+postprocessing stage. The PDF reports `disabled` when rendering is disabled.
+Previously completed cases can be rerendered explicitly; `--resume` does not
+automatically revisit cases already marked `postprocessing_done`.
+
+### Configuration and independent reruns
+
+An optional **case-local** `visualization.json` overrides the defaults. The
+function's `config` argument overrides that file. Unknown keys fail validation.
+For example:
+
+```json
+{
+  "image_resolution": [4000, 2400],
+  "surface_phases": 24,
+  "volume_phases": 8,
+  "statistics_revolutions": 5,
+  "wake_stations_D": [-1, -0.5, 0, 0.5, 1, 2],
+  "q_over_omega2": [0.1, 0.5, 1],
+  "threads": 2,
+  "timeout_seconds": 21600,
+  "required": false
+}
+```
+
+Other settings: `enabled` (default true), `executable`, `diameter_m`, `observer_m`
+and `color_ranges`. Diameter follows the same geometry-name convention as
+preprocessing, with a blade-surface radius fallback. Supply `diameter_m` explicitly
+for differently named cases, especially in permeable mode. `observer_m` changes
+the atlas marker only; it does not change the acoustic solver's observer.
+
+Supported color-range keys: `surface_p`, `surface_speed`,
+`surface_p_fluctuation`, `p_mean`, `p_rms`, `dpdt_rms`, `volume_speed`,
+`volume_axial_velocity`, `volume_p`, `volume_vorticity_magnitude`, `volume_k`,
+`volume_Co`, and the wall array names `p`, `yPlus`, `wallShearStress`.
+Values are `[minimum, maximum]` in the displayed units.
+
+Run from the pipeline environment to render an existing case and regenerate its
+PDF without rerunning CFD or acoustic propagation:
+
+```python
+from pathlib import Path
+from visualization import run_visualization
+from createSimulationReport import create_simulation_report
+
+case = Path("/server/simulation-order/10x7E_6000RPM_AMI_kOmegaSST")
+run_visualization("impermeable", case, 6000)
+create_simulation_report(case, rpm=6000, mode="AMI", turbulence_model="kOmegaSST")
+```
+
+Do not remove source data on the strength of a successful manifest alone. This
+change implements no retention policy; the visual archive cannot recreate
+arbitrary future slices or new acoustic predictions after those data are removed.
+
+Validation: `python -m unittest discover -s tests -v`. Set
+`RUN_PARAVIEW_TESTS=1` to include actual ParaView rendering of a tiny synthetic
+OpenFOAM case, analytic pressure statistics, rotating/stationary surface handling,
+topology rejection and PDF integration. Those optional checks also need `pypdf`.
+
+ParaView references: [Python and batch processing](https://docs.paraview.org/en/latest/Tutorials/ClassroomTutorials/pythonAndBatchPvpythonAndPvbatch.html),
+[headless rendering](https://www.paraview.org/paraview-docs/latest/cxx/Offscreen.html).
 
 ## Minimal Command Templates
 

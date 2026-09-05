@@ -10,10 +10,10 @@ nCellsBetweenLevels 3;
 
 rotaryRegionSurfaceRefinementLevel (3 3);
 
-propellerSurfaceRefinementLevel (6 6); // Uniform propeller surface refinement.
+propellerSurfaceRefinementLevel (5 5); // Uniform propeller surface refinement.
 
 propellerRefinementRegionMode distance;
-propellerRefinementRegionLevel ((0.0045 6) (0.0125 5));
+propellerRefinementRegionLevel ((0.0045 5) (0.0125 4));
 
 rotaryRegionRefinementRegionMode inside;
 rotaryRegionRefinementRegionLevel ((1E15 3));
@@ -31,9 +31,9 @@ nSmoothPatch 3;
 tolerance 1.0;
 nSolveIter 30;
 nRelaxIter 20;
-nFeatureSnapIter 0;
+nFeatureSnapIter 10;
 implicitFeatureSnap false;
-explicitFeatureSnap false;
+explicitFeatureSnap true;
 multiRegionFeatureSnap false;
 
 // Native snappyHexMesh layers with absolute dimensions in metres.
@@ -55,7 +55,7 @@ maxFaceThicknessRatio 0.5;
 maxThicknessToMedialRatio 0.2;
 minMedialAxisAngle 90;
 nLayerIter 100;
-nBufferCellsNoExtrude 1;
+nBufferCellsNoExtrude 0;
 
 maxNonOrtho 65;
 maxBoundarySkewness 4;

@@ -22,7 +22,7 @@ surfaces
     "outerCylinder.stl"
 );
 
-includedAngle 150;
+includedAngle 120;
 
 
 

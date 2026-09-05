@@ -9,6 +9,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from tools import (
+    append_visualization_report,
     create_force_plots,
     create_mesh_element_plot,
     create_moments_plots,
@@ -527,6 +528,7 @@ def create_simulation_report(
         c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
         c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
 
+    visualization_summary = append_visualization_report(c, case_path)
     c.save()
 
     if not quiet:
@@ -543,6 +545,7 @@ def create_simulation_report(
         "mesh_element_types": mesh_element_types,
         "yplus_plot_path": str(yplus_plot) if yplus_plot is not None else None,
         "acoustic_plot": str(acoustic_plot) if acoustic_plot.is_file() else None,
+        "visualization": visualization_summary,
         "yplus_stats": yplus_stats,
         "average_yplus": (
             yplus_stats["average_yplus"] if yplus_stats is not None else None
@@ -566,4 +569,3 @@ def create_simulation_report(
         "residual_plot_path": str(residual_plot) if residual_plot is not None else None,
         "residual_slope_info": residual_slope_info,
     }
-

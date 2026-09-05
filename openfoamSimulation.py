@@ -47,7 +47,8 @@ def openfoamSimulation(
     parallel snappy mesh is reconstructed to the root case, layered by
     host-side cfMesh using this case's allocated core count, checked by
     OpenFOAM 13, and re-decomposed before NCC/solver execution. Mesh-only mode
-    stops after the final selected mesh workflow and leaves sim.foam.
+    stops after the final selected mesh workflow, exports native snappy layer
+    cells from addedCells to VTK, and leaves sim.foam for ParaView.
     """
     convergence_check_interval = 1
 
@@ -456,6 +457,21 @@ actions
             # generation method and final checkMesh. Never create NCCs or run
             # solver/postprocessing work. Keep sim.foam for direct ParaView.
             if MESH_ONLY:
+                if boundary_layer_method == "none":
+                    layer_cells_vtk_cmd = (
+                        "bash -c 'source /opt/openfoam13/etc/bashrc && "
+                        "foamToVTK -constant -cellSet addedCells "
+                        "> log.foamToVTK.addedCells 2>&1'"
+                    )
+                    if not run_openfoam_command(
+                        container,
+                        layer_cells_vtk_cmd,
+                        "export boundary-layer cells to VTK",
+                        STATUS_CALLBACK,
+                        "layerCellsVTK",
+                    ):
+                        return False
+
                 foam_file_cmd = "bash -c 'touch sim.foam'"
                 if not run_openfoam_command(
                     container,
@@ -614,11 +630,13 @@ actions
                     SIMULATION_DIRECTORY=simulation_working_directory,
                     RESUME=True,
                     TURBULENCE_MODEL=TURBULENCE_MODEL,
+                    status_callback=STATUS_CALLBACK,
+                    maximum_time=safe_time,
                 ):
                     report_case_stage(
                         STATUS_CALLBACK,
                         "resume_check",
-                        "reconstructed safe timestep failed integrity checks",
+                        "reconstructed history failed integrity checks; see log.processor_cleanup_check",
                         error="Resume reconstruction integrity check failed",
                     )
                     return False
@@ -810,6 +828,7 @@ actions
                 SIMULATION_DIRECTORY=simulation_working_directory,
                 RESUME=False,
                 TURBULENCE_MODEL=TURBULENCE_MODEL,
+                status_callback=STATUS_CALLBACK,
             )
 
             if is_processor_deletion_safe:
@@ -828,7 +847,7 @@ actions
                 report_case_stage(
                     STATUS_CALLBACK,
                     "cleanup",
-                    "processor folders preserved because reconstruction integrity check failed",
+                    "processor folders preserved; see log.processor_cleanup_check for the failed check",
                 )
 
         status = True
