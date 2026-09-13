@@ -24,13 +24,13 @@ boundaryField
     #includeEtc "caseDicts/setConstraintTypes"
 
     
-	farfield
+	"inlet|outlet|walls"
 	{
         type            pressureInletOutletVelocity;
         value           uniform (0 0 0);
 	}
 
-    rotorAMI
+    rotaryRegion
     {
         type            movingWallSlipVelocity;
         value           $internalField;
@@ -40,7 +40,7 @@ boundaryField
         // type noSlip;
     }
 
-    statorAMI
+    rotaryRegion_slave
     {
         type            movingWallSlipVelocity;
         value           $internalField;
@@ -50,7 +50,7 @@ boundaryField
         // type noSlip;
     }
 
-    cubeWall
+    propeller
     {
     type            movingWallVelocity;
     value           uniform (0 0 0);

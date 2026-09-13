@@ -50,16 +50,30 @@ adjustTimeStep  $adjustTimeStep;
 
 maxCo           $maxCo;
 
-maxDiCo         $maxDiCo;
-
 functions
 {
+
+    startupDeltaTCap
+    {
+        type        fluidMaxDeltaT;
+
+        maxCo       5;
+
+        maxDeltaT table
+        (
+            (0         1.2e-8)
+            (2.4e-7    1.2e-8)
+            (1.2e-6    5.0e-5)
+        );
+    }
+
+
     forcesBlades
     {
         type            forces;
         libs            ("libforces.so");
 
-        patches         (propellerTip);    
+        patches         (propeller);    
 
         // For incompressible simpleFoam:
         rho             rhoInf;
@@ -75,18 +89,16 @@ functions
         libs            ("libsampling.so");
         fields          (U);
         probeLocations  ((0.128 0.01 0.01));  
-        writeControl    timeStep;
-        writeInterval   10;
+         writeControl    writeTime;
     }
 
     yPlus
     {
         type            yPlus;
         libs            ("libfieldFunctionObjects.so");
-        patches         (propellerTip);
+        patches         (propeller);
         log             yes;
-        writeControl    timeStep;
-        writeInterval   10;
+        writeControl    writeTime;
 
         // Enable to also view y+ distribution in paraFoam
         // objects         ();
@@ -96,10 +108,9 @@ functions
     {
         type            wallShearStress;
         libs            ("libfieldFunctionObjects.so");
-        patches         (propellerTip);
+        patches         (propeller);
         log             yes;
-        writeControl    timeStep;
-        writeInterval   10;
+        writeControl    writeTime;
 
     }
 
@@ -107,14 +118,13 @@ functions
     {
         type            residuals;
         libs            ("libutilityFunctionObjects.so");
-        writeControl    timeStep;
-        writeInterval   10;
+        writeControl    writeTime;
         fields
         (
             p
             U
             k
-            omega
+            epsilon
         );
     }
 
@@ -131,47 +141,132 @@ functions
         libs            ("libfieldFunctionObjects.so");
         writeControl    writeTime;
     }
-    /*
-    wakeLines
+
+    CourantNumber
     {
-        type            sets;
-        libs            ("libsampling.so");
+        type                CourantNo;
+        libs                ("libfieldFunctionObjects.so");
 
-        writeControl    timeStep;
-        writeInterval   5;
-        setFormat       csv;
+        executeControl      timeStep;
+        executeInterval     1;
 
-        interpolationScheme cellPoint;
+        writeControl        writeTime;
+    }
 
-        fields          (U vorticity);
+    Umax
+    {
+        type                volFieldValue;
+        libs                ("libfieldFunctionObjects.so");
 
-        sets
+        writeControl        writeTime;
+
+        log                 true;
+        writeFields         false;
+        writeLocation       true;
+
+        cellZone            all;
+        operation           maxMag;
+
+        fields
         (
-            yMinus01
-            {
-                type    lineUniform;
-                axis    x;
-                start   (-0.30 -0.10 0);
-                end     ( 0.30 -0.10 0);
-                nPoints 100;   // dx = 0.025 over 0.6 m
-            }
-            yMinus02
-            {
-                type    lineUniform;
-                axis    x;
-                start   (-0.30 -0.20 0);
-                end     ( 0.30 -0.20 0);
-                nPoints 100;
-            }
-            yMinus03
-            {
-                type    lineUniform;
-                axis    x;
-                start   (-0.30 -0.30 0);
-                end     ( 0.30 -0.30 0);
-                nPoints 100;
-            }
+            U
         );
-    } */
+    }
+
+    scalarMax
+    {
+        type                volFieldValue;
+        libs                ("libfieldFunctionObjects.so");
+
+        writeControl        writeTime;
+
+        log                 true;
+        writeFields         false;
+        writeLocation       true;
+
+        cellZone            all;
+        operation           max;
+
+        fields
+        (
+            p
+            k
+            epsilon
+            Co
+        );
+    }
+
+    scalarMin
+    {
+        type                volFieldValue;
+        libs                ("libfieldFunctionObjects.so");
+
+        writeControl        writeTime;
+
+        log                 true;
+        writeFields         false;
+        writeLocation       true;
+
+        cellZone            all;
+        operation           min;
+
+        fields
+        (
+            p
+            k
+            epsilon
+        );
+    }
+
+    writePatchFields
+    {
+        type            surfaces;
+        enabled         $impermeableEnabled;
+        libs            ("libsampling.so");
+ 
+        writeControl    timeStep;
+        writeInterval   1;
+        surfaceFormat   vtk;
+ 
+        fields          (p U);
+ 
+        interpolationScheme cellPoint;  //<- default
+ 
+        surfaces
+        {
+            propeller
+            {
+                type            patch;
+                patches         (propeller);
+                interpolate     false;
+            }
+        }
+    }
+
+    writePermeableSurfaceFields
+    {
+        type            surfaces;
+        enabled         $permeableEnabled;
+        libs            ("libsampling.so");
+       
+        writeControl    timeStep;
+        writeInterval   1;
+        surfaceFormat   vtk;
+ 
+        fields          (p U);
+ 
+        interpolationScheme cellPoint;
+ 
+        surfaces
+        {
+            permeableSurface
+            {
+                type            triSurfaceMesh;
+                surface         permeableSurface.stl;
+                source          cells;
+                interpolate     false;
+            }
+        }
+    }
 }
 // ************************************************************************* //

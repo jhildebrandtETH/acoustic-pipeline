@@ -9,7 +9,7 @@ FoamFile
 couples
 (
     {
-        patch1 innerCylinder;
-        patch2 innerCylinder_slave;
+        patch1 rotaryRegion;
+        patch2 rotaryRegion_slave;
     }
 );

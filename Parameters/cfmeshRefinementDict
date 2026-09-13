@@ -1,0 +1,12 @@
+FoamFile { version 2.0; format ascii; class dictionary; object cfmeshRefinementDict; }
+// Dimensions reproduce normal kOmegaSST-AMI preprocessing.
+// R = 0.5 * sphereDiameterFactor * measured propeller span.
+// In permeable mode --acoustic-sphere-diameter replaces sphereDiameterFactor.
+enabled true;
+sphereDiameterFactor 2.5;
+wakeOffsetFactor -0.12;
+innerRadiusFactor 0.6;
+innerHeightFactor 0.52;
+outerRadiusFactor 0.8;
+outerHeightFactor 0.72;
+sphereSubdivisions 6;

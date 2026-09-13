@@ -23,23 +23,23 @@ boundaryField
 {
     #includeEtc "caseDicts/setConstraintTypes"
 
-    farfield
+    "inlet|outlet|walls"
     {
         type            totalPressure;
         p0              uniform 0;
     }
 
-    cubeWall
+    propeller
     {
         type            zeroGradient;
     }
 
-    rotorAMI
+    rotaryRegion
     {
     type zeroGradient;
     }
 
-    statorAMI
+    rotaryRegion_slave
     {
     type zeroGradient;
     }

@@ -1,0 +1,18 @@
+FoamFile { version 2.0; format ascii; class dictionary; object meshDict; }
+#include "cfmeshCommon.cpp"
+surfaceFile "constant/triSurface/domain.ftr";
+maxCellSize $backgroundCellSize;
+localRefinement
+{
+    "rotaryRegion_slave_.*" { cellSize $interfaceCellSize; }
+}
+// Stationary region stays layer-free, including when rotor layers are enabled.
+workflowControls { stopAfter edgeExtraction; }
+// Add cfMesh objectRefinements here if desired, using physical coordinates.
+
+// Generated from cfmeshDomainDict, cfmeshRefinementDict and cfmeshCommon.cpp.
+// The same region definitions are used on both sides of the rotating interface.
+objectRefinements
+{
+    #includeIfPresent "cfmeshRegions.generated"
+}

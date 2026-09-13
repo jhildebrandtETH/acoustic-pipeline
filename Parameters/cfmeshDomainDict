@@ -1,0 +1,8 @@
+FoamFile { version 2.0; format ascii; class dictionary; object cfmeshDomainDict; }
+// All coordinates and cell sizes are in metres. Shaft is Y through (0 0 0).
+scale 1;
+boxMin (-0.385 -0.650 -0.385);
+boxMax ( 0.385  0.385  0.385);
+rotorRadiusFactor 0.6;  // radius / measured propeller span
+rotorHalfLength 0.025;
+cylinderSegments 256;

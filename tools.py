@@ -630,6 +630,17 @@ class LiveBatchDashboard:
         self._thread = None
         self._is_tty = bool(sys.stdout.isatty())
         self._last_non_tty_render = 0.0
+        self._animate = (
+            self._is_tty
+            and os.environ.get("TERM") != "dumb"
+            and os.environ.get("ACOUSTIC_DASHBOARD_ANIMATION", "1") != "0"
+        )
+        self._animation_color = "NO_COLOR" not in os.environ
+        try:
+            "▀▄█".encode(sys.stdout.encoding or "ascii")
+            self._animation_unicode = True
+        except (UnicodeError, LookupError):
+            self._animation_unicode = False
 
     @staticmethod
     def _clip(value, width):
@@ -732,15 +743,48 @@ class LiveBatchDashboard:
         return "\n".join(lines)
 
     def _run(self):
-        while not self._stop_event.wait(self.refresh_interval):
-            now = time.time()
+        from terminal_propeller import frame, status_overlay
 
-            if self._is_tty:
-                print("\033[H\033[J" + self.render_text(), end="", flush=True)
-            elif now - self._last_non_tty_render >= 30.0:
-                # In redirected output / SLURM logs, avoid ANSI escape spam.
-                print("\n" + self.render_text(), flush=True)
-                self._last_non_tty_render = now
+        started = time.monotonic()
+        next_status = 0.0
+        last_size = None
+        overlay = None
+        interval = min(self.refresh_interval, 0.1) if self._animate else self.refresh_interval
+        try:
+            if self._animate:
+                print("\033[?25l", end="", flush=True)
+            while not self._stop_event.wait(interval):
+                now = time.monotonic()
+                if self._is_tty:
+                    size = shutil.get_terminal_size()
+                    output = ""
+                    if now >= next_status or size != last_size:
+                        status = self.render_text()
+                        overlay = status_overlay(status, size.columns, size.lines) if self._animate else None
+                        if overlay is None:
+                            output = "\033[H\033[J" + status
+                        elif size != last_size:
+                            output = "\033[H\033[J"
+                        next_status = now + self.refresh_interval
+                        last_size = size
+                    if overlay is not None:
+                        output += "\033[H" + "\n".join(frame(
+                            now - started,
+                            width=size.columns - 1,
+                            height=size.lines - 1,
+                            overlay=overlay,
+                            unicode=self._animation_unicode,
+                            color=self._animation_color,
+                        ))
+                    if output:
+                        print(output, end="", flush=True)
+                elif now - self._last_non_tty_render >= 30.0:
+                    # In redirected output / SLURM logs, avoid ANSI escape spam.
+                    print("\n" + self.render_text(), flush=True)
+                    self._last_non_tty_render = now
+        finally:
+            if self._animate:
+                print("\033[0m\033[?25h", end="", flush=True)
 
     def start(self):
         if self._thread is not None:
@@ -1075,6 +1119,10 @@ def reactivate_failed_cases_for_resume(
 
         if status == "failed":
             resume_status = case.get("resume_status")
+            if order.get("meshing_backend") == "cfmesh-native-rotor-stator-v1":
+                case_path = Path(simulations_directory) / case["folder"]
+                if case.get("mesh_only") or not case_path.is_dir() or not get_safe_timestep(case_path):
+                    resume_status = "pending"
 
             if resume_status not in {
                 "pending",
@@ -1138,7 +1186,6 @@ def execute_simulation_case(
     # Local imports avoid circular imports: preprocessing/openfoamSimulation/
     # postprocessing themselves import helpers from tools.py.
     from openfoamSimulation import openfoamSimulation
-    from postprocessing import postprocessing
     from preprocessing import preprocessing
 
     folder_name = case["folder"]
@@ -1222,6 +1269,7 @@ def execute_simulation_case(
                     ACOUSTIC_SURFACE=args.acoustic_surface,
                     ACOUSTIC_SPHERE_DIAMETER=args.acoustic_sphere_diameter,
                     STATUS_CALLBACK=callback,
+                    LIVE_OUTPUT=getattr(args, "live_output", False),
                 )
 
                 if is_study_case:
@@ -1264,6 +1312,7 @@ def execute_simulation_case(
                     ),
                     MODE=mode,
                     END_ON_MODE=args.end_on,
+                    END_ON_VALUE=getattr(args, "end_on_value", None),
                     TURBULENCE_MODEL=args.turbulence,
                     initialize_from_previous=use_previous_init,
                     previous_simulation_path=previous_simulation_path,
@@ -1271,6 +1320,7 @@ def execute_simulation_case(
                     MESH_ONLY=args.mesh_only,
                     ALLOW_BAD_MESH=args.allow_bad_mesh,
                     BOUNDARY_LAYER_METHOD=args.boundary_layers,
+                    LIVE_OUTPUT=getattr(args, "live_output", False),
                     STATUS_CALLBACK=callback,
                 )
 
@@ -1371,6 +1421,7 @@ def execute_simulation_case(
                     ),
                     MODE=mode,
                     END_ON_MODE=args.end_on,
+                    END_ON_VALUE=getattr(args, "end_on_value", None),
                     TURBULENCE_MODEL=args.turbulence,
                     initialize_from_previous=use_previous_init,
                     previous_simulation_path=previous_simulation_path,
@@ -1378,6 +1429,7 @@ def execute_simulation_case(
                     MESH_ONLY=args.mesh_only,
                     ALLOW_BAD_MESH=args.allow_bad_mesh,
                     BOUNDARY_LAYER_METHOD=args.boundary_layers,
+                    LIVE_OUTPUT=getattr(args, "live_output", False),
                     STATUS_CALLBACK=callback,
                 )
 
@@ -1433,6 +1485,7 @@ def execute_simulation_case(
                     progress=0.0,
                 )
 
+                from postprocessing import postprocessing
                 postprocessing(
                     ACOUSTIC_SURFACE=args.acoustic_surface,
                     SIMULATION_WORKING_DIRECTORY=simulation_path,
@@ -1542,7 +1595,8 @@ def run_parallel_scheduler(
         thread_name_prefix="simulation-case",
     )
     running_futures = {}
-    dashboard.start()
+    if not getattr(args, "live_output", False):
+        dashboard.start()
 
     try:
         while True:
@@ -1665,7 +1719,8 @@ def run_parallel_scheduler(
 
     finally:
         executor.shutdown(wait=True, cancel_futures=False)
-        dashboard.stop(final_render=True)
+        if not getattr(args, "live_output", False):
+            dashboard.stop(final_render=True)
 
 
 
@@ -2305,7 +2360,7 @@ def safe_exec(
             line = raw_line.decode("utf-8", errors="ignore").strip()
             if line:
                 output_tail.append(line)
-            if print_output and status_callback is None:
+            if print_output:
                 print(line)
 
         inspect = api.exec_inspect(exec_id)
@@ -2647,24 +2702,35 @@ def update_case_status(simulations_directory: Path, folder_name: str, new_status
         _atomic_write_json(json_path, batch)
 
 
+def parse_end_on(values):
+    """Parse the CLI stop condition while retaining legacy bare 'time'."""
+    mode = values[0]
+    if mode not in {"time", "rev", "convergence", "force_convergence", "residual_convergence"}:
+        raise ValueError("--end-on expects time SECONDS, rev REVOLUTIONS, or a convergence mode")
+    if len(values) == 1 and mode != "rev":
+        return mode, None
+    if len(values) != 2 or mode not in {"time", "rev"}:
+        raise ValueError("Only --end-on time and --end-on rev accept one numeric value; rev requires it")
+    try:
+        value = float(values[1])
+    except ValueError:
+        raise ValueError("--end-on value must be a finite positive number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("--end-on value must be a finite positive number")
+    return mode, value
+
+
 def create_simulation_order(args, simulations_directory: Path):
     """Create the durable simulation order including scheduler metadata."""
     simulations_directory = Path(simulations_directory)
     simulations_directory.mkdir(parents=True, exist_ok=True)
     json_path = simulations_directory / "simulation_order.json"
 
-    if json_path.exists():
-        raise FileExistsError(
-            f"Simulation order already exists in this directory:\n"
-            f"{json_path}\n\n"
-            f"One simulation order must have its own simulation_run folder. "
-            f"Create a new directory or use --resume."
-        )
-
     total_cores = int(args.total_cores)
 
     batch = {
         "schema_version": 2,
+        "meshing_backend": "cfmesh-native-rotor-stator-v1",
         "acoustic_surface": args.acoustic_surface,
         "acoustic_sphere_diameter": args.acoustic_sphere_diameter,
         "mode": args.mode,
@@ -2675,6 +2741,7 @@ def create_simulation_order(args, simulations_directory: Path):
         "field_init": args.field_init,
         "mesh_only": args.mesh_only,
         "end_on": args.end_on,
+        "end_on_value": getattr(args, "end_on_value", None),
         "allow_bad_mesh": args.allow_bad_mesh,
         "boundary_layers": args.boundary_layers,
         "study": args.study,
@@ -2695,7 +2762,7 @@ def create_simulation_order(args, simulations_directory: Path):
 
         for value in study_values:
             safe_value = make_folder_safe(value)
-            folder = f"{mesh}_{rpm}RPM_{args.study_parameter}_{safe_value}"
+            folder = f"{mesh}_{rpm}RPM_{make_folder_safe(args.study_parameter)}_{safe_value}"
 
             batch["cases"].append(
                 {
@@ -2708,6 +2775,7 @@ def create_simulation_order(args, simulations_directory: Path):
                     "turbulence": args.turbulence,
                     "mesh_only": args.mesh_only,
                     "end_on": args.end_on,
+                    "end_on_value": getattr(args, "end_on_value", None),
                     "allow_bad_mesh": args.allow_bad_mesh,
                     "field_init": args.field_init,
                     "study": True,
@@ -2733,6 +2801,7 @@ def create_simulation_order(args, simulations_directory: Path):
                         "turbulence": args.turbulence,
                         "mesh_only": args.mesh_only,
                         "end_on": args.end_on,
+                        "end_on_value": getattr(args, "end_on_value", None),
                         "acoustic_surface": args.acoustic_surface,
                         "acoustic_sphere_diameter": args.acoustic_sphere_diameter,
                         "allow_bad_mesh": args.allow_bad_mesh,
@@ -2746,6 +2815,10 @@ def create_simulation_order(args, simulations_directory: Path):
                         "error": None,
                     }
                 )
+
+    folders = [case["folder"] for case in batch["cases"]]
+    if not folders or len(set(folders)) != len(folders):
+        raise ValueError("Order needs distinct, non-empty case/study values")
 
     add_field_initialization_dependencies(
         batch["cases"],
@@ -2772,7 +2845,10 @@ def create_simulation_order(args, simulations_directory: Path):
         args.study,
     )
 
+    from cfmesh_orders import require_new_order
+
     with _SIMULATION_ORDER_FILE_LOCK:
+        require_new_order(simulations_directory)
         _atomic_write_json(json_path, batch)
 
     print(
@@ -2803,6 +2879,16 @@ def is_mesh_ok(log_path, quiet=False):
 # CONVERGENCE / LIVE PROGRESS MONITORS
 # ============================================================================
 
+# SETTINGS: slope/change OVER ONE REVOLUTION, shared by checks and the report.
+slope_bounds = {
+    "p":  (-10e-2, 10e-2), #(-5e-2, 1e-2)
+    "Ux": (-10e-2, 10e-3), #(-5e-2, 5e-3)
+    "Uy": (-10e-2, 10e-3), #(-5e-2, 5e-3)
+    "Uz": (-10e-2, 10e-3), #(-5e-2, 5e-3)
+    "k":  (-10e-2, 10e-3), #(-5e-2, 5e-3)
+}
+
+
 def check_residuals(
     residuals_file,
     revolution_time,
@@ -2826,17 +2912,6 @@ def check_residuals(
             builtins.print(*args, **kwargs)
 
     print = _conditional_print
-
-    # SETTINGS
-    # Bounds are now interpreted as slope/change OVER ONE REVOLUTION
-    slope_bounds = {
-        "p":  (-10e-2, 10e-2), #(-5e-2, 1e-2)
-        "Ux": (-10e-2, 10e-3), #(-5e-2, 5e-3)
-        "Uy": (-10e-2, 10e-3), #(-5e-2, 5e-3)
-        "Uz": (-10e-2, 10e-3), #(-5e-2, 5e-3)
-        "k":  (-10e-2, 10e-3), #(-5e-2, 5e-3)
-    }
-    ###
 
     # Read header explicitly from second line
     with open(residuals_file, "r") as f:
@@ -4427,6 +4502,7 @@ def evaluate_residual_slopes(df, rev_time, latest_time):
 
     last_rev_start = latest_time - rev_time
     window = df[(df["Time"] >= last_rev_start) & (df["Time"] <= latest_time)].copy()
+    passed_fields = dict.fromkeys(slope_bounds, False)
 
     if len(window) < 2:
         return {
@@ -4434,6 +4510,7 @@ def evaluate_residual_slopes(df, rev_time, latest_time):
             "window_end_s": latest_time,
             "n_samples": int(len(window)),
             "slopes_per_rev": {},
+            "passed_fields": passed_fields,
             "end_residuals": {},
             "mean_residuals": {},
             "reason": "Not enough residual samples in final revolution window.",
@@ -4466,6 +4543,13 @@ def evaluate_residual_slopes(df, rev_time, latest_time):
         slope, _intercept = np.polyfit(x_valid, y_log, 1)
 
         slopes_per_rev[col] = float(slope)
+        if col in slope_bounds:
+            lower_bound, upper_bound = slope_bounds[col]
+            passed_fields[col] = bool(
+                latest_time > rev_time
+                and np.count_nonzero(valid) >= 10
+                and lower_bound <= slope <= upper_bound
+            )
         end_residuals[col] = float(values[valid][-1])
         mean_residuals[col] = float(np.mean(values[valid]))
 
@@ -4474,6 +4558,7 @@ def evaluate_residual_slopes(df, rev_time, latest_time):
         "window_end_s": float(window["Time"].iloc[-1]),
         "n_samples": int(len(window)),
         "slopes_per_rev": slopes_per_rev,
+        "passed_fields": passed_fields,
         "end_residuals": end_residuals,
         "mean_residuals": mean_residuals,
         "reason": None,
@@ -4616,7 +4701,7 @@ def visualization_settings(case_path, rpm, acoustic_surface, overrides=None):
         raise ValueError("q_over_omega2 thresholds must be positive")
     range_keys = {"surface_p", "surface_speed", "surface_p_fluctuation", "p_mean", "p_rms", "dpdt_rms",
                   "volume_speed", "volume_axial_velocity", "volume_p", "volume_vorticity_magnitude",
-                  "volume_k", "volume_Co", "p", "yPlus", "wallShearStress"}
+                  "volume_k", "volume_Co", "volume_swirl_velocity", "p", "yPlus", "wallShearStress"}
     if not isinstance(settings["color_ranges"], dict) or set(settings["color_ranges"]) - range_keys:
         raise ValueError("color_ranges must map documented field keys to [minimum, maximum]")
     for key, limits in settings["color_ranges"].items():
@@ -4794,7 +4879,7 @@ def append_visualization_report(c, case_path):
         "These figures show saved CFD fields and acoustic-surface diagnostics. Hydrodynamic pressure, its fluctuations and vortex structures are not radiated sound or SPL. Use the FW-H observer spectrum for the acoustic prediction. Steady loading on rotating panels can still radiate tonal noise; low rotating-frame RMS does not imply low sound.",
         "Rotation axis: +y through the origin; lengths in metres. Rotor phase is omega*t modulo 360 degrees, relative to solver t=0. Signed y/D stations are shown on both sides of the rotor; identify the downstream side using axial velocity.",
         "Surface statistics use time-weighted samples over the recorded window. Blade statistics follow verified rotating panels; permeable-surface statistics use verified stationary panels. They are window statistics, not a claim of statistical convergence. No volume averaging across a moving mesh is performed.",
-        "Color ranges are fixed within each comparison family for this case, with full extrema retained in metadata. Cross-case comparison requires matching color_ranges in visualization.json. Derivative maps are limited by saved sample cadence and are not an FW-H source decomposition.",
+        "Slice color ranges cover the displayed region and are fixed across the selected phases at each station. Different stations may use different ranges; compare their legends. Full displayed-region extrema remain in metadata. Cross-case comparison requires matching color_ranges in visualization.json. Derivative maps are limited by saved sample cadence.",
         "The manifest, rendering script, settings, extracted surface statistics and original-resolution PNGs are retained under report/visuals. No CFD fields or postprocessing data are deleted. A visualization recipe alone cannot recreate views after source data are removed.",
     ]:
         y = paragraph(note, y)
@@ -4814,12 +4899,12 @@ def append_visualization_report(c, case_path):
         # Manifest paths must stay in this case's visual archive.
         try:
             image_path.resolve().relative_to(root)
-            c.drawImage(str(image_path), 42, 143, width=w - 84, height=h - 205,
+            c.drawImage(str(image_path), 30, 126, width=w - 60, height=h - 183,
                         preserveAspectRatio=True, anchor="c", mask="auto")
             embedded += 1
         except Exception as exc:
             paragraph(f"Image unavailable: {exc}", h - 85)
-        y = paragraph(item["caption"], 132)
+        y = paragraph(item["caption"], 117)
         metadata = [f"View: {item.get('camera', 'n/a')}"]
         if "time_s" in item:
             metadata += [f"Time: {item['time_s']:.8g} s", f"Rotor phase: {item['phase_deg']:.3f} deg"]
@@ -4938,7 +5023,7 @@ def _pvvis_limits(values, key, settings, symmetric=False):
 def _pvvis_render(source, result, settings, run_dir, view, title, caption,
                   camera="oblique", field=None, limits=None, center=None, span=None,
                   time_s=None, edges=False, overlays=(), diverging=False, opacity=1.0):
-    source.UpdatePipeline()
+    source.UpdatePipeline(time_s) if time_s is not None else source.UpdatePipeline()
     info = source.GetDataInformation()
     if info.GetNumberOfCells() == 0:
         raise ValueError(f"Empty geometry for {title}")
@@ -4957,23 +5042,39 @@ def _pvvis_render(source, result, settings, run_dir, view, title, caption,
     display.Specular = 0.0
     bounds = list(info.GetBounds())
     center = list(center) if center is not None else [(bounds[2*i] + bounds[2*i+1]) / 2 for i in range(3)]
-    span = span or max(bounds[2*i+1] - bounds[2*i] for i in range(3))
-    span = max(span, 1e-8)
     directions = {"oblique": [1.3, 1.0, 1.6], "front": [0, 1, 0],
                   "back": [0, -1, 0], "xy": [0, 0, 1], "yz": [1, 0, 0]}
-    direction = directions[camera]
+    direction = np.asarray(directions[camera] if isinstance(camera, str) else camera, dtype=float)
+    direction /= np.linalg.norm(direction)
+    up = np.array([0, 0, 1] if isinstance(camera, str) and camera in {"front", "back"} else [0, 1, 0], dtype=float)
+    right = np.cross(up, direction)
+    right /= np.linalg.norm(right)
+    up = np.cross(direction, right)
+    aspect = settings["image_resolution"][0] / settings["image_resolution"][1]
+    if span is None:
+        # Fit the actual projected geometry, not a domain-sized bounding sphere.
+        corners = np.array([[x, y, z] for x in bounds[:2] for y in bounds[2:4] for z in bounds[4:]]) - center
+        half_height = max(np.max(np.abs(corners @ up)), np.max(np.abs(corners @ right)) / aspect, 1e-8)
+        span = max(bounds[2*i+1] - bounds[2*i] for i in range(3))
+    else:
+        half_height = max(span / 2, span / (2 * aspect), 1e-8)
+    span = max(span, 1e-8)
     view.CameraParallelProjection = 1
     view.CameraFocalPoint = center
-    view.CameraPosition = [center[i] + direction[i] * span * 3 for i in range(3)]
-    view.CameraViewUp = [0, 0, 1] if camera in {"front", "back"} else [0, 1, 0]
-    view.CameraParallelScale = span * 0.67
+    view.CameraViewUp = up.tolist()
+    view.CameraParallelScale = half_height * (1.38 if field else 1.26)
+    # Lift geometry clear of the scalar bar without shrinking it.
+    focal_point = np.asarray(center) - up * half_height * (0.15 if field else 0.)
+    view.CameraFocalPoint = focal_point.tolist()
+    view.CameraPosition = (focal_point + direction * span * 3).tolist()
     view.AxesGrid.UseCustomBounds = 1
+    view.AxesGrid.AxesToLabel = sum(1 << i for i in range(3) if abs(direction[i]) < .95)
     view.AxesGrid.CustomBounds = [value for i in range(3) for value in
                                  (max(bounds[2*i], center[i] - span/2), min(bounds[2*i+1], center[i] + span/2))]
     for i, axis in enumerate("XYZ"):
         low, high = view.AxesGrid.CustomBounds[2*i:2*i+2]
         setattr(view.AxesGrid, axis + "AxisUseCustomLabels", 1)
-        setattr(view.AxesGrid, axis + "AxisLabels", [float(v) for v in np.linspace(low, high, 5)] if high - low > span * 1e-8 else [float(low)])
+        setattr(view.AxesGrid, axis + "AxisLabels", [float(f"{v:.4g}") for v in (low, high)] if high - low > span * 1e-8 else [float(low)])
     display.SetScalarBarVisibility(view, False)
     data_range = None
     if field:
@@ -5005,11 +5106,11 @@ def _pvvis_render(source, result, settings, run_dir, view, title, caption,
         bar.Orientation = "Horizontal"
         bar.ScalarBarLength = 0.6
         bar.TitleColor = bar.LabelColor = [0.08, 0.1, 0.13]
-        bar.TitleFontSize, bar.LabelFontSize = 18, 16
+        bar.TitleFontSize, bar.LabelFontSize = 20, 18
         bar.AutomaticLabelFormat = 0
         # Recent VTK uses std::format; older ParaView versions use printf.
-        bar.LabelFormat = "{:.8g}" if "{" in str(bar.LabelFormat) else "%.8g"
-        bar.RangeLabelFormat = "{:.8g}" if "{" in str(bar.RangeLabelFormat) else "%.8g"
+        bar.LabelFormat = "{:.4g}" if "{" in str(bar.LabelFormat) else "%.4g"
+        bar.RangeLabelFormat = "{:.4g}" if "{" in str(bar.RangeLabelFormat) else "%.4g"
         bar.UseCustomLabels = 1
         bar.CustomLabels = [float(v) for v in np.linspace(*limits, 5)]
     else:
@@ -5024,8 +5125,8 @@ def _pvvis_render(source, result, settings, run_dir, view, title, caption,
     pvs.SaveScreenshot(str(run_dir / filename), view, ImageResolution=settings["image_resolution"], TransparentBackground=0)
     entry = {
         "title": title, "caption": caption, "image": f"{run_dir.name}/{filename}",
-        "camera": camera, "bounds_m": bounds,
-        "camera_position_m": list(view.CameraPosition), "camera_focal_point_m": center,
+        "camera": camera if isinstance(camera, str) else "blade section", "bounds_m": bounds,
+        "camera_position_m": list(view.CameraPosition), "camera_focal_point_m": list(view.CameraFocalPoint),
         "parallel_scale_m": float(view.CameraParallelScale),
     }
     if field:
@@ -5281,6 +5382,111 @@ def _pvvis_calc(source, name, expression):
     return calculation
 
 
+def _pvvis_crop(source, center, widths):
+    """Physically crop to the plotted region so remote cells cannot set its legend."""
+    cropped = pvs.Clip(Input=source)
+    cropped.ClipType = "Box"
+    cropped.ClipType.Position = [center[i] - widths[i] / 2 for i in range(3)]
+    cropped.ClipType.Length = list(widths)
+    cropped.Invert = 1
+    cropped.Crinkleclip = 1  # Retain native cells; ordinary Clip invents triangle edges.
+    return cropped
+
+
+def _pvvis_blade_detail(base, wall, t, result, settings, run_dir, view, units):
+    """Use the saved blade geometry to place chordwise cuts, including its actual phase."""
+    from vtkmodules.util.numpy_support import vtk_to_numpy
+
+    merged = pvs.MergeBlocks(Input=wall)
+    surface = pvs.ExtractSurface(Input=merged)
+    try:
+        surface.UpdatePipeline(t)
+        data = servermanager.Fetch(surface)  # Only the blade surface, never the volume.
+        points = vtk_to_numpy(data.GetPoints().GetData())
+        radial_points = points[:, [0, 2]]
+        _, axes = np.linalg.eigh(radial_points.T @ radial_points)
+        radial = np.array([axes[0, -1], 0., axes[1, -1]])
+        tangent = np.cross([0., 1., 0.], radial)
+        radius = np.linalg.norm(radial_points, axis=1).max()
+        for fraction in (0.5, 0.75, 0.95, -0.95):
+            origin = radial * radius * fraction
+            outline = pvs.Slice(Input=surface)
+            outline.Triangulatetheslice = 0
+            outline.SliceType.Normal = radial.tolist()
+            outline.SliceType.Origin = origin.tolist()
+            sliced = pvs.Slice(Input=base)
+            sliced.Triangulatetheslice = 0
+            sliced.SliceType.Normal = radial.tolist()
+            sliced.SliceType.Origin = origin.tolist()
+            cropped = None
+            try:
+                outline.UpdatePipeline(t)
+                if outline.GetDataInformation().GetNumberOfCells() == 0:
+                    continue
+                section = servermanager.Fetch(outline)
+                xyz = vtk_to_numpy(section.GetPoints().GetData())
+                center = (xyz.min(axis=0) + xyz.max(axis=0)) / 2
+                span = max(float(np.ptp(xyz @ tangent)) * 1.6, radius * 0.12)
+                cropped = _pvvis_crop(sliced, center, [span] * 3)
+                cropped.UpdatePipeline(t)
+                station = f"r/R={fraction:g}"
+                caption = (f"Chordwise cut at signed {station}, normal to the blade's measured principal radial axis. "
+                           "Blade position comes from the saved mesh. Velocity is relative to rigid rotation about +y. "
+                           "Inspect near-wall gradients and the trailing-edge shear layer; resolved detail depends on the mesh and saved fields.")
+                for name, label in (("relative_speed", "Blade-relative speed [m/s]"),
+                                    ("vorticity_magnitude", "Vorticity magnitude [1/s]")):
+                    _pvvis_attempt(result, run_dir, f"Blade section {name} {station}", lambda: _pvvis_render(
+                        cropped, result, settings, run_dir, view, f"Blade flow section - {name.replace('_', ' ')} ({station})",
+                        caption + " Local color scale.", camera=radial.tolist(), field=("CELLS", name, label),
+                        time_s=t, overlays=[outline]))
+                if cropped.CellData.GetArray("relative_velocity") is not None:
+                    normal_vector = "(" + "+".join(f"{v:.16g}*{axis}Hat" for v, axis in zip(radial, "ijk")) + ")"
+                    projected = _pvvis_calc(cropped, "section_velocity",
+                                            f"relative_velocity-dot(relative_velocity,{normal_vector})*{normal_vector}")
+                    centers = pvs.CellCenters(Input=projected)
+                    arrows = pvs.Glyph(Input=centers, GlyphType="Arrow")
+                    arrows.OrientationArray = ["POINTS", "section_velocity"]
+                    arrows.ScaleArray = ["POINTS", "No scale array"]
+                    arrows.ScaleFactor = span * .035
+                    arrows.GlyphMode = "Uniform Spatial Distribution (Bounds Based)"
+                    arrows.MaximumNumberOfSamplePoints = 200
+                    try:
+                        _pvvis_render(cropped, result, settings, run_dir, view, f"Blade-relative flow directions ({station})",
+                                      caption + " Equal-length arrows show the in-plane direction; color gives full relative speed, including its out-of-plane component.",
+                                      camera=radial.tolist(), field=("CELLS", "relative_speed", "Blade-relative speed [m/s]"),
+                                      time_s=t, overlays=[outline, arrows])
+                    finally:
+                        pvs.Delete(arrows)
+                        pvs.Delete(centers)
+                        pvs.Delete(projected)
+                _pvvis_render(cropped, result, settings, run_dir, view, f"Blade mesh section ({station})",
+                              "Actual volume-cell intersections around the blade profile. Inspect layer continuity, growth and transitions; section widths are not wall-normal layer-thickness measurements.",
+                              camera=radial.tolist(), edges=True, time_s=t, overlays=[outline])
+                # Two extrema along the local chord: do not guess which is the leading edge.
+                for side, index in (("chord end A", np.argmin(xyz @ tangent)), ("chord end B", np.argmax(xyz @ tangent))):
+                    zoom_center = xyz[index]
+                    zoom = _pvvis_crop(sliced, zoom_center, [span * .3] * 3)
+                    try:
+                        _pvvis_render(zoom, result, settings, run_dir, view, f"Blade layer mesh - {side} ({station})",
+                                      "Magnified volume-cell section at a chord extremum. Inspect edge resolution, near-wall layers and refinement transitions. A/B label geometry, not an inferred leading/trailing edge.",
+                                      camera=radial.tolist(), edges=True, time_s=t)
+                        _pvvis_attempt(result, run_dir, f"Near-wall flow {station} {side}", lambda: _pvvis_render(
+                            zoom, result, settings, run_dir, view, f"Near-wall flow - {side} ({station})",
+                            caption + " Local color scale; cell edges expose the available resolution.",
+                            camera=radial.tolist(), field=("CELLS", "relative_speed", "Blade-relative speed [m/s]"),
+                            edges=True, time_s=t))
+                    finally:
+                        pvs.Delete(zoom)
+            finally:
+                if cropped is not None:
+                    pvs.Delete(cropped)
+                pvs.Delete(sliced)
+                pvs.Delete(outline)
+    finally:
+        pvs.Delete(surface)
+        pvs.Delete(merged)
+
+
 def _pvvis_volume(result, settings, run_dir, view, units):
     case = Path(settings["case_path"])
     if not (case / "constant" / "polyMesh").is_dir():
@@ -5317,7 +5523,30 @@ def _pvvis_volume(result, settings, run_dir, view, units):
     proxies = []
     base = reader
     if "U" in wanted:
-        for name, expression in (("speed", "mag(U)"), ("axial_velocity", "U_Y")):
+        omega = settings["rpm"] * 2 * math.pi / 60
+        relative = pvs.PythonCalculator(Input=base)
+        relative.ArrayAssociation = "Cell Data"
+        relative.ArrayName = "relative_velocity"
+        relative.UseMultilineExpression = 1
+        relative.MultilineExpression = f"""import numpy as np
+from vtkmodules.vtkFiltersCore import vtkCellCenters
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+def velocity(block):
+    centers = vtkCellCenters()
+    centers.SetInputData(block.VTKObject)
+    centers.Update()
+    xyz = dsa.WrapDataObject(centers.GetOutput()).Points
+    return block.CellData['U'] - {omega:.16g} * np.cross([0., 1., 0.], xyz)
+data = inputs[0]
+if isinstance(data, dsa.CompositeDataSet):
+    return dsa.VTKCompositeDataArray([velocity(block) for block in data], dataset=data)
+return velocity(data)
+"""
+        base = relative
+        proxies.append(base)
+        for name, expression in (("speed", "mag(U)"), ("axial_velocity", "U_Y"),
+                                 ("relative_speed", "mag(relative_velocity)"),
+                                 ("swirl_velocity", "dot(U-relative_velocity,U)/(mag(U-relative_velocity)+1e-30)")):
             base = _pvvis_calc(base, name, expression)
             proxies.append(base)
         if "vorticity" not in wanted or "Q" not in wanted:
@@ -5335,6 +5564,7 @@ def _pvvis_volume(result, settings, run_dir, view, units):
     fields = []
     if "U" in wanted:
         fields += [("speed", "Speed [m/s]", False), ("axial_velocity", "Axial velocity U_y [m/s]", True),
+                   ("swirl_velocity", "Tangential velocity [m/s]", True),
                    ("vorticity_magnitude", "Vorticity magnitude [1/s]", False)]
     if "p" in wanted:
         fields += [("p", f"{units[1]} [{units[0]}]", False)]
@@ -5344,60 +5574,91 @@ def _pvvis_volume(result, settings, run_dir, view, units):
         fields += [("Co", "Cell Courant number [-]", False)]
     if not fields:
         raise ValueError("No supported volume fields found")
-    ranges = {name: [math.inf, -math.inf] for name, _, _ in fields}
+    ranges_by_station = {}
+    # Broad wake context plus rotor close-ups; all legends use these actual crops.
+    cuts = [("xy", [0, 0, 1], [0, 0, 0], "z=0, wake", [1.35*diameter, 2.5*diameter, 1.35*diameter]),
+            ("yz", [1, 0, 0], [0, 0, 0], "x=0, wake", [1.35*diameter, 2.5*diameter, 1.35*diameter]),
+            ("xy", [0, 0, 1], [0, 0, 0], "z=0, rotor", [1.15*diameter]*3),
+            ("yz", [1, 0, 0], [0, 0, 0], "x=0, rotor", [1.15*diameter]*3)]
+    cuts += [("front", [0, 1, 0], [0, station*diameter, 0], f"y/D={station:g}", [1.35*diameter]*3)
+             for station in settings["wake_stations_D"]]
     try:
-        # Range pass processes one time at a time. Never fetch a volume to Python.
-        for t, _ in selected:
-            base.UpdatePipeline(t)
-            for name, _, _ in fields:
-                array = base.CellData.GetArray(name)
-                if array is None:
-                    raise ValueError(f"Missing volume array {name} at {t:g}")
-                lo, hi = array.GetRange()
-                ranges[name] = [min(ranges[name][0], lo), max(ranges[name][1], hi)]
-        ranges = {name: _pvvis_limits(ranges[name], f"volume_{name}", settings, symmetric) for name, _, symmetric in fields}
         for t, _ in selected:
             view.ViewTime = t
             base.UpdatePipeline(t)
             bounds = base.GetDataInformation().GetBounds()
-            # Two meridional planes contain the rotation axis.
-            cuts = [("xy", [0, 0, 1], [0, 0, 0], "z=0"), ("yz", [1, 0, 0], [0, 0, 0], "x=0")]
-            # Rotor-normal cuts explicitly retain signed stations: no downstream assumption.
-            cuts += [("front", [0, 1, 0], [0, station * diameter, 0], f"y/D={station:g}") for station in settings["wake_stations_D"]]
-            for camera, normal, origin, station in cuts:
+            for camera, normal, origin, station, widths in cuts:
                 if not all(bounds[2*i] <= origin[i] <= bounds[2*i+1] for i in range(3)):
                     result["warnings"].append(f"Slice {station} lies outside saved domain at {t:g} s")
                     continue
                 sliced = pvs.Slice(Input=base)
+                sliced.Triangulatetheslice = 0
                 sliced.SliceType = "Plane"
                 sliced.SliceType.Origin = origin
                 sliced.SliceType.Normal = normal
-                sliced.UpdatePipeline(t)
+                cropped = _pvvis_crop(sliced, origin, widths)
+                pressure = None
                 # Latest time gets the full diagnostic set; earlier times show
                 # velocity/pressure/vorticity to expose transient wake changes.
                 active = fields if t == selected[-1][0] else [f for f in fields if f[0] in {"speed", "p", "vorticity_magnitude"}]
                 try:
+                    if station not in ranges_by_station:
+                        ranges = {name: [math.inf, -math.inf] for name, _, _ in fields}
+                        for sample_time, _ in selected:
+                            cropped.UpdatePipeline(sample_time)
+                            if cropped.GetDataInformation().GetNumberOfCells() == 0:
+                                continue
+                            for name, _, _ in fields:
+                                lo, hi = cropped.CellData.GetArray(name).GetRange()
+                                ranges[name] = [min(ranges[name][0], lo), max(ranges[name][1], hi)]
+                        ranges_by_station[station] = {
+                            name: _pvvis_limits(ranges[name], f"volume_{name}", settings, symmetric)
+                            for name, _, symmetric in fields}
+                    ranges = ranges_by_station[station]
+                    cropped.UpdatePipeline(t)
+                    if "p" in wanted:
+                        reference = sum(ranges["p"]) / 2
+                        pressure = _pvvis_calc(cropped, "p_departure", f"p - {reference:.16g}")
                     for name, label, diverging in active:
+                        limits = ranges[name]
+                        display_source, display_name = cropped, name
+                        note = ""
+                        if name == "p":
+                            display_source, display_name = pressure, "p_departure"
+                            limits = [value - reference for value in limits]
+                            label = f"p - reference [{units[0]}]"
+                            diverging = True
+                            note = f" Pressure reference = {reference:.10g} {units[0]} (fixed range midpoint, not freestream or acoustic pressure)."
                         _pvvis_attempt(result, run_dir, f"{name}, {station}, t={t:g}", lambda: _pvvis_render(
-                            sliced, result, settings, run_dir, view, f"Flow slice - {name.replace('_', ' ')} ({station})",
-                            f"Plane {station}, laboratory frame; D={diameter:.6g} m. Inspect wake asymmetry, shear layers and structures near the acoustic integration surface. View is focused on the rotor region; full slice extrema determine the common color scale. CFD flow fields are not propagating acoustic pressure.",
-                            camera=camera, field=("CELLS", name, label), limits=ranges[name], center=origin,
-                            span=diameter * (2.5 if camera in {"xy", "yz"} else 1.35), time_s=t, diverging=diverging))
-                    if t == selected[-1][0] and station in {"z=0", "y/D=0"}:
+                            display_source, result, settings, run_dir, view, f"Flow slice - {name.replace('_', ' ')} ({station})",
+                            f"Plane {station}, laboratory frame; D={diameter:.6g} m. Inspect wake asymmetry, shear layers and rotor loading. Color range covers this cropped station across all selected phases; compare legends between stations." + note,
+                            camera=camera, field=("CELLS", display_name, label), limits=limits,
+                            time_s=t, diverging=diverging))
+                    if t == selected[-1][0]:
                         _pvvis_attempt(result, run_dir, f"Mesh slice {station}", lambda: _pvvis_render(
-                            sliced, result, settings, run_dir, view, f"Mesh section ({station})",
+                            cropped, result, settings, run_dir, view, f"Mesh section ({station})",
                             "Inspect refinement transitions and rotor-region cell structure. Slice edges show sectioned cells; they do not quantify mesh quality or prove adequate boundary-layer resolution.",
-                            camera=camera, center=origin, span=diameter * 1.35, edges=True, time_s=t))
+                            camera=camera, edges=True, time_s=t))
                 finally:
+                    if pressure is not None:
+                        pvs.Delete(pressure)
+                    pvs.Delete(cropped)
                     pvs.Delete(sliced)
             if "U" in wanted:
                 def vortex_views():
-                    point_data = pvs.CellDatatoPointData(Input=base)
+                    region = _pvvis_crop(base, [0, 0, 0], [1.35*diameter, 2.5*diameter, 1.35*diameter])
+                    point_data = pvs.CellDatatoPointData(Input=region)
                     point_data.ProcessAllArrays = 0
-                    point_data.CellDataArraytoprocess = ["Q", "speed"]
+                    point_data.CellDataArraytoprocess = ["Q", "vorticity_magnitude"]
                     contour = pvs.Contour(Input=point_data)
                     contour.ContourBy = ["POINTS", "Q"]
                     try:
+                        color_range = [math.inf, -math.inf]
+                        for sample_time, _ in selected:
+                            region.UpdatePipeline(sample_time)
+                            lo, hi = region.CellData.GetArray("vorticity_magnitude").GetRange()
+                            color_range = [min(color_range[0], lo), max(color_range[1], hi)]
+                        color_range = _pvvis_limits(color_range, "volume_vorticity_magnitude", settings)
                         omega = settings["rpm"] * 2 * math.pi / 60
                         for normalized_q in settings["q_over_omega2"]:
                             threshold = normalized_q * omega ** 2
@@ -5406,20 +5667,22 @@ def _pvvis_volume(result, settings, run_dir, view, units):
                             for camera in ("oblique", "xy"):
                                 _pvvis_attempt(result, run_dir, f"Q={threshold:g}, {camera}, t={t:g}", lambda: _pvvis_render(
                                     contour, result, settings, run_dir, view, f"Vortex structures - Q/omega^2 = {normalized_q:g}",
-                                    f"Q={threshold:.6g} s^-2, colored by speed. Several fixed nondimensional thresholds expose sensitivity of apparent vortex extent. Q uses the velocity gradient; cell values are interpolated to points for the isosurface. Vortex structures are not acoustic source strength.",
-                                    camera=camera, field=("POINTS", "speed", "Speed [m/s]"), limits=ranges["speed"], center=[0, 0, 0], span=diameter * 2.5, time_s=t))
+                                    f"Q={threshold:.6g} s^-2, colored by vorticity magnitude. Camera fits the vortex geometry within the rotor/wake crop. Fixed Q/omega^2 thresholds expose threshold sensitivity; colors are fixed across phases. Cells are interpolated to points for isosurfaces. Vortices are not acoustic source strength.",
+                                    camera=camera, field=("POINTS", "vorticity_magnitude", "Vorticity magnitude [1/s]"), limits=color_range, time_s=t))
                     finally:
                         pvs.Delete(contour)
                         pvs.Delete(point_data)
+                        pvs.Delete(region)
                 _pvvis_attempt(result, run_dir, f"Vortex views t={t:g}", vortex_views)
+        _pvvis_attempt(result, run_dir, "Blade wall and section details", lambda: _pvvis_wall(
+            marker, selected[-1][0], result, settings, run_dir, view, units, base=base))
     finally:
         for proxy in reversed(proxies):
             pvs.Delete(proxy)
         pvs.Delete(reader)
-    _pvvis_attempt(result, run_dir, "Blade wall fields", lambda: _pvvis_wall(marker, selected[-1][0], result, settings, run_dir, view, units))
 
 
-def _pvvis_wall(marker, t, result, settings, run_dir, view, units):
+def _pvvis_wall(marker, t, result, settings, run_dir, view, units, base=None):
     wall = pvs.OpenFOAMReader(FileName=str(marker))
     try:
         wall.UpdatePipelineInformation()
@@ -5447,18 +5710,22 @@ def _pvvis_wall(marker, t, result, settings, run_dir, view, units):
             _pvvis_render(wall, result, settings, run_dir, view, f"Blade surface mesh ({camera})",
                           "Inspect blade surface panel density near edges, root and tip. This surface view cannot measure prism-layer thickness; consult mesh sections and checkMesh results.",
                           camera=camera, time_s=t, edges=True)
+        if base is not None:
+            _pvvis_attempt(result, run_dir, "Blade cross-sections", lambda: _pvvis_blade_detail(
+                base, wall, t, result, settings, run_dir, view, units))
     finally:
         pvs.Delete(wall)
 
 
 def _pvvis_main(settings_path):
+    pvs._DisableFirstRenderCameraReset()
     settings_path = Path(settings_path)
     run_dir = settings_path.parent
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     result = {"status": "running", "views": [], "warnings": [], "paraview_version": str(pvs.GetParaViewVersion())}
     _pvvis_save(result, run_dir)
     view = pvs.CreateView("RenderView")
-    view.ViewSize = [1500, 900]
+    view.ViewSize = settings["image_resolution"]
     view.UseColorPaletteForBackground = 0
     view.Background = [1.0, 1.0, 1.0]
     view.BackgroundColorMode = "Single Color"
@@ -5475,6 +5742,7 @@ def _pvvis_main(settings_path):
         setattr(view.AxesGrid, axis + "LabelColor", [0.15, 0.18, 0.21])
         setattr(view.AxesGrid, axis + "TitleFontSize", 16)
         setattr(view.AxesGrid, axis + "LabelFontSize", 14)
+        setattr(view.AxesGrid, axis + "AxisPrecision", 3)
     units = _pvvis_pressure_units(Path(settings["case_path"]))
     result["pressure_units"] = {"unit": units[0], "label": units[1]}
     if units[0] in {"units unverified", "unknown dimensions"}:

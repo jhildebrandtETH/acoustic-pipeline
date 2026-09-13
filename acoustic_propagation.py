@@ -1,3 +1,4 @@
+import json
 import math
 
 import matplotlib.pyplot as plt
@@ -25,9 +26,7 @@ def run_acoustic_solver(
 
     if ACOUSTIC_SURFACE == "impermeable":
         surface_directory = (
-            SIMULATION_WORKING_DIRECTORY
-            / "postProcessing"
-            / "writePatchFields"
+            SIMULATION_WORKING_DIRECTORY / "postProcessing" / "writePatchFields"
         )
         acoustic_surface_directory = (
             SIMULATION_WORKING_DIRECTORY
@@ -49,6 +48,40 @@ def run_acoustic_solver(
         )
         surface_file = "permeableSurface.vtk"
         permeable = True
+
+    sample_times = sorted(
+        float(directory.name)
+        for directory in surface_directory.iterdir()
+        if directory.is_dir() and (directory / surface_file).is_file()
+    )
+    if not sample_times:
+        raise ValueError(f"No acoustic surface samples found in {surface_directory}")
+    minimum_duration = 5.0 * 60.0 / RPM
+    sampled_duration = sample_times[-1] - sample_times[0]
+    status_path = SIMULATION_WORKING_DIRECTORY / "report/acoustic-status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(sample_times) < 3 or sampled_duration < minimum_duration:
+        detail = (
+            f"Acoustic spectrum unavailable: sampled {sampled_duration:g} s; "
+            f"five rotations require at least {minimum_duration:g} s, "
+            "plus propagation delay. Extend the flow run for a spectrum."
+        )
+        status_path.write_text(
+            json.dumps(
+                {
+                    "status": "insufficient_duration",
+                    "sample_count": len(sample_times),
+                    "sampled_duration_s": sampled_duration,
+                    "minimum_source_duration_s": minimum_duration,
+                    "detail": detail,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        print(detail, flush=True)
+        emit_status(STATUS_CALLBACK, stage="acoustics", detail=detail, progress=100.0)
+        return None
 
     create_reference_geometry_vtk_series(
         surface_directory,
@@ -78,9 +111,10 @@ def run_acoustic_solver(
         surface_file=surface_file,
         rpm=rpm,
         permeable=permeable,
-        moving_surface=True,
+        # The sampled permeable sphere is fixed in the inertial frame.
+        moving_surface=not permeable,
         rotation_center_m=[0.0, 0.0, 0.0],
-        omega_rad_s=[0.0, omega_rad_s, 0.0],
+        omega_rad_s=[0.0, omega_rad_s if not permeable else 0.0, 0.0],
         device=device,
         cache_dir=SIMULATION_WORKING_DIRECTORY / ".cache" / cache_name,
     )
@@ -116,6 +150,19 @@ def run_acoustic_solver(
         fig = ax.figure if hasattr(ax, "figure") else plt.gcf()
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close(fig)
+
+    status_path.write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "sample_count": len(sample_times),
+                "sampled_duration_s": sampled_duration,
+                "spectrum": str(output_path),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
     emit_status(
         STATUS_CALLBACK,

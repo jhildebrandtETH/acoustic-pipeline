@@ -25,16 +25,16 @@ addLayers       $addLayers;
 // - to 'snap' the mesh boundary to the surface
 geometry
 {
-    innerCylinder.stl
+    rotaryRegion.stl
     {
         type        triSurfaceMesh;
-        file        "innerCylinder.stl";
-        name        innerCylinder;
+        file        "rotaryRegion.stl";
+        name        rotaryRegion;
         regions
         {
-            innerCylinder
+            rotaryRegion
             {
-                name    innerCylinder;
+                name    rotaryRegion;
             }
         }
     }
@@ -52,16 +52,16 @@ geometry
         }
     }
 
-    propellerTip.stl
+    propeller.stl
     {
         type        triSurfaceMesh;
-        file        "propellerTip.stl";
-        name        propellerTip;
+        file        "propeller.stl";
+        name        propeller;
         regions
         {
             patch0
             {
-                name    propellerTip;
+                name    propeller;
             }
         }
     }
@@ -116,11 +116,11 @@ castellatedMeshControls
     features
     (
         //{
-        //    file        "innerCylinder.eMesh";
+        //    file        "rotaryRegion.eMesh";
         //    level       4;
         //}
         {
-            file        "propellerTip.eMesh";
+            file        "propeller.eMesh";
             level       4;
         }
 
@@ -139,18 +139,18 @@ castellatedMeshControls
 
     refinementSurfaces
     {
-        innerCylinder
+        rotaryRegion
         {
-            level       $innerCylinderSurfaceRefinementLevel;
+            level       $rotaryRegionSurfaceRefinementLevel;
          
             faceType    boundary;
-            cellZone    innerCylinder;
-            faceZone    innerCylinder;
+            cellZone    rotaryRegion;
+            faceZone    rotaryRegion;
             cellZoneInside  inside;
         }
-        propellerTip
+        propeller
         {
-            level       $propellerTipSurfaceRefinementLevel;
+            level       $propellerSurfaceRefinementLevel;
         }
     }
 
@@ -179,23 +179,23 @@ castellatedMeshControls
             levels      $outerCylinderRefinementRegionLevel;
         }
 
-        innerCylinder
+        rotaryRegion
         {
-            mode $innerCylinderRefinementRegionMode;
-            levels $innerCylinderRefinementRegionLevel;
+            mode $rotaryRegionRefinementRegionMode;
+            levels $rotaryRegionRefinementRegionLevel;
         }
 
-        //innerCylinder
+        //rotaryRegion
         //{
           //  mode        inside;
             //levels      ((1E15 3));
         //}
 
         //}
-        propellerTip
+        propeller
         {
             mode distance;
-            levels ((0.01 $propellerTipRegionLevel) (0.03 3));;
+            levels ((0.01 $propellerRegionLevel) (0.03 3));;
         }
     }
     
@@ -264,9 +264,9 @@ addLayersControls
 
     layers
     {
-        propellerTip
+        propeller
         {
-            nSurfaceLayers $propellerTipSurfaceLayers;
+            nSurfaceLayers $propellerSurfaceLayers;
         }
     }
 

@@ -1,0 +1,7 @@
+{
+  "scale": 1,
+  "domain_span_in_propeller_diameters": 3,
+  "max_cell_size": 0.02,
+  "propeller_cell_size": 0.00125,
+  "refinement_thickness": 0.005
+}

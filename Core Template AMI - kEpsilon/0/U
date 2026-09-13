@@ -40,7 +40,7 @@ boundaryField
         type            slip;
 	}
 
-    innerCylinder
+    rotaryRegion
     {
         type            movingWallSlipVelocity;
         value           $internalField;
@@ -50,7 +50,7 @@ boundaryField
         // type noSlip;
     }
 
-    innerCylinder_slave
+    rotaryRegion_slave
     {
         type            movingWallSlipVelocity;
         value           $internalField;
@@ -60,9 +60,10 @@ boundaryField
         // type noSlip;
     }
 
-    "propellerTip"
+    "propeller"
     {
-        type            noSlip;
+        type movingWallVelocity;
+        value uniform (0 0 0);
     }
 }
 

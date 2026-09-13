@@ -3,8 +3,11 @@ from datetime import datetime
 import numpy as np
 import re
 import math
+import json
+import textwrap
 
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.colors import green, red
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
@@ -413,6 +416,7 @@ def create_simulation_report(
             y_table = 278
             c.setFont("Helvetica-Bold", 8)
             c.drawString(50, y_table, "Field")
+            c.drawString(110, y_table, "Check")
             c.drawString(160, y_table, "Slope / rev")
             c.drawString(260, y_table, "Final residual")
             c.drawString(370, y_table, "Mean residual")
@@ -430,6 +434,12 @@ def create_simulation_report(
                 mean_text = "n/a" if mean_value is None else f"{mean_value:.3e}"
 
                 c.drawString(50, y_table, str(field)[:18])
+                passed = residual_slope_info.get("passed_fields", {}).get(field)
+                c.saveState()
+                if passed is not None:
+                    c.setFillColor(green if passed else red)
+                c.drawString(110, y_table, "n/a" if passed is None else "PASS" if passed else "FAILED")
+                c.restoreState()
                 c.drawString(160, y_table, slope_text)
                 c.drawString(260, y_table, end_text)
                 c.drawString(370, y_table, mean_text)
@@ -525,8 +535,15 @@ def create_simulation_report(
         if not quiet:
             print(warning)
         c.setFont("Helvetica", 10)
-        c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
-        c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
+        status_path = report_dir / "acoustic-status.json"
+        if status_path.is_file():
+            acoustic_status = json.loads(status_path.read_text())
+            detail = acoustic_status.get("detail", "Acoustic spectrum is unavailable.")
+            for index, line in enumerate(textwrap.wrap(detail, width=88)):
+                c.drawString(50, h - 110 - 15 * index, line)
+        else:
+            c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
+            c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
 
     visualization_summary = append_visualization_report(c, case_path)
     c.save()

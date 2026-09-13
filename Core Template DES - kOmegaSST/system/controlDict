@@ -50,16 +50,30 @@ adjustTimeStep  $adjustTimeStep;
 
 maxCo           $maxCo;
 
-maxDiCo         $maxDiCo;
-
 functions
 {
+
+    startupDeltaTCap
+    {
+        type        fluidMaxDeltaT;
+
+        maxCo       5;
+
+        maxDeltaT table
+        (
+            (0         1.2e-8)
+            (2.4e-7    1.2e-8)
+            (1.2e-6    5.0e-5)
+        );
+    }
+
+
     forcesBlades
     {
         type            forces;
         libs            ("libforces.so");
 
-        patches         (cubeWall);    
+        patches         (propeller);    
 
         // For incompressible simpleFoam:
         rho             rhoInf;
@@ -82,7 +96,7 @@ functions
     {
         type            yPlus;
         libs            ("libfieldFunctionObjects.so");
-        patches         (cubeWall);
+        patches         (propeller);
         log             yes;
         writeControl    writeTime;
 
@@ -94,7 +108,7 @@ functions
     {
         type            wallShearStress;
         libs            ("libfieldFunctionObjects.so");
-        patches         (cubeWall);
+        patches         (propeller);
         log             yes;
         writeControl    writeTime;
 
@@ -207,6 +221,7 @@ functions
     writePatchFields
     {
         type            surfaces;
+        enabled         $impermeableEnabled;
         libs            ("libsampling.so");
  
         writeControl    timeStep;
@@ -219,10 +234,36 @@ functions
  
         surfaces
         {
-            cubeWall
+            propeller
             {
                 type            patch;
-                patches         (cubewall);
+                patches         (propeller);
+                interpolate     false;
+            }
+        }
+    }
+
+    writePermeableSurfaceFields
+    {
+        type            surfaces;
+        enabled         $permeableEnabled;
+        libs            ("libsampling.so");
+       
+        writeControl    timeStep;
+        writeInterval   1;
+        surfaceFormat   vtk;
+ 
+        fields          (p U);
+ 
+        interpolationScheme cellPoint;
+ 
+        surfaces
+        {
+            permeableSurface
+            {
+                type            triSurfaceMesh;
+                surface         permeableSurface.stl;
+                source          cells;
                 interpolate     false;
             }
         }

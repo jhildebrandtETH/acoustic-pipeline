@@ -1,0 +1,37 @@
+FoamFile { version 2.0; format ascii; class dictionary; object meshDict; }
+#include "cfmeshCommon.cpp"
+surfaceFile "constant/triSurface/domain.ftr";
+maxCellSize $backgroundCellSize;
+localRefinement
+{
+    propeller
+    {
+        cellSize $propellerCellSize;
+        refinementThickness $propellerRefinementThickness;
+    }
+    "rotaryRegion_.*" { cellSize $interfaceCellSize; }
+}
+// Complete native cfMesh workflow: generate and refine propeller boundary layers.
+// Use --boundary-layers none for a separate no-layer comparison.
+// cfMesh also inserts its automatic base layer on the rotor interface.
+boundaryLayers
+{
+    patchBoundaryLayers
+    {
+        propeller
+        {
+            nLayers 3;
+            thicknessRatio 1.2;
+            // Optional: maxFirstLayerThickness 0.0001;
+            // A cap can leave a thick final layer; disabled for the three-layer baseline.
+            allowDiscontinuity 1;
+        }
+    }
+}
+
+// Generated from cfmeshDomainDict, cfmeshRefinementDict and cfmeshCommon.cpp.
+// The same region definitions are used on both sides of the rotating interface.
+objectRefinements
+{
+    #includeIfPresent "cfmeshRegions.generated"
+}

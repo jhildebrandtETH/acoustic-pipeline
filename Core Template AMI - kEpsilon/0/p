@@ -40,19 +40,19 @@ boundaryField
         type            zeroGradient;
     }
 
-    propellerTip
+    propeller
     {
         type            zeroGradient;
     }
 
-    innerCylinder
+    rotaryRegion
     {
     type    fixedFluxPressure;
     // If there are issues, revert back to: 
     // type zeroGradient;
     }
 
-    innerCylinder_slave
+    rotaryRegion_slave
     {
     type    fixedFluxPressure;
     // If there are issues, revert back to: 

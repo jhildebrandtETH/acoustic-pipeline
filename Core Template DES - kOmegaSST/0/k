@@ -23,25 +23,25 @@ boundaryField
 {
     #includeEtc "caseDicts/setConstraintTypes"
 
-	farfield
+	"inlet|outlet|walls"
 	{
 		type            inletOutlet;
         inletValue      uniform 1e-10;
         value           uniform 1e-10;
 	}
 
-    cubeWall
+    propeller
     {
         type            fixedValue;
         value           uniform 1e-12;
     }
 
-    rotorAMI
+    rotaryRegion
     {
     type    zeroGradient;
     }
 
-    statorAMI
+    rotaryRegion_slave
     {
     type    zeroGradient;
     }

@@ -1,4 +1,5 @@
 import os
+import math
 import threading
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from tools import run_convergence_monitor
 from tools import run_time_progress_monitor
 from tools import safe_exec
 from tools import verify_openfoam_patch_exists
+from tools import update_parameter
 
 
 def openfoamSimulation(
@@ -38,17 +40,13 @@ def openfoamSimulation(
     initialize_from_previous=False,
     previous_simulation_path=None,
     STATUS_CALLBACK=None,
+    END_ON_VALUE=None,
+    LIVE_OUTPUT=False,
 ):
     """
-    Run one complete OpenFOAM case inside its own Docker container.
-
-    NUMBER_OF_CORES == 1 uses a true serial OpenFOAM path. Two or more cores use
-    the decomposed MPI path. When cfMesh boundary layers are enabled, the
-    parallel snappy mesh is reconstructed to the root case, layered by
-    host-side cfMesh using this case's allocated core count, checked by
-    OpenFOAM 13, and re-decomposed before NCC/solver execution. Mesh-only mode
-    stops after the final selected mesh workflow, exports native snappy layer
-    cells from addedCells to VTK, and leaves sim.foam for ParaView.
+    Run native cfMesh rotor/stator meshing, Foundation 13 NCC, and the existing
+    solver/reconstruction route. Mesh-only includes the finished rotating zone
+    and NCC interface. cfMesh uses allocated OpenMP threads; solver uses MPI.
     """
     convergence_check_interval = 1
 
@@ -62,9 +60,9 @@ def openfoamSimulation(
     parallel_run = number_of_cores > 1
     boundary_layer_method = str(BOUNDARY_LAYER_METHOD).strip().lower()
 
-    if boundary_layer_method not in {"none", "cfmesh"}:
+    if boundary_layer_method not in {"none", "cfmesh", "dict"}:
         raise ValueError(
-            "BOUNDARY_LAYER_METHOD must be one of: 'none', 'cfmesh'"
+            "BOUNDARY_LAYER_METHOD must be dict, none, or cfmesh"
         )
 
     if number_of_cores < 1:
@@ -82,8 +80,12 @@ def openfoamSimulation(
             number_of_cores,
         )
 
+        import hashlib
+        import re
+        key = hashlib.sha256(str(simulation_working_directory.resolve()).encode()).hexdigest()[:10]
+        container_name = "cfmesh-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", simulation_name)[:80] + "-" + key
         client = docker.from_env()
-        remove_stale_stopped_container(client, simulation_name, STATUS_CALLBACK)
+        remove_stale_stopped_container(client, container_name, STATUS_CALLBACK)
 
         my_volumes = {
             str(simulation_working_directory): {
@@ -105,7 +107,7 @@ def openfoamSimulation(
 
         container = client.containers.run(
             image="microfluidica/openfoam:13",
-            name=simulation_name,
+            name=container_name,
             volumes=my_volumes,
             working_dir="/simulation",
             command="bash",
@@ -120,437 +122,20 @@ def openfoamSimulation(
         # NEW CASE: mesh preparation
         # ------------------------------------------------------------------
         if not resume:
-            block_mesh_cmd = (
-                "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                "blockMesh > log.blockMesh 2>&1'"
+            from cfmesh_pipeline import run_mesh, docker_run
+            mesh_ok = run_mesh(
+                container, simulation_working_directory, number_of_cores,
+                boundary_layer_method, ALLOW_BAD_MESH, STATUS_CALLBACK, LIVE_OUTPUT,
             )
-            if not run_openfoam_command(
-                container,
-                block_mesh_cmd,
-                "blockMesh",
-                STATUS_CALLBACK,
-                "blockMesh",
-            ):
-                return False
-
-            surface_features_cmd = (
-                "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                "surfaceFeatures > log.surfaceFeatures 2>&1'"
-            )
-            if not run_openfoam_command(
-                container,
-                surface_features_cmd,
-                "surfaceFeatures",
-                STATUS_CALLBACK,
-                "surfaceFeatures",
-            ):
-                return False
-
-            if parallel_run:
-                clear_initial_sets_cmd = (
-                    "bash -c 'rm -rf constant/polyMesh/sets'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    clear_initial_sets_cmd,
-                    "clear stale mesh sets before initial decomposition",
-                    STATUS_CALLBACK,
-                    "decomposeParPrep",
-                ):
-                    return False
-
-                decompose_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "decomposePar -copyZero > log.decomposePar 2>&1'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    decompose_cmd,
-                    "decomposePar",
-                    STATUS_CALLBACK,
-                    "decomposePar",
-                ):
-                    return False
-
-                snappy_cmd = (
-                    "bash -c '"
-                    "set -o pipefail; "
-                    "source /opt/openfoam13/etc/bashrc && "
-                    f"mpirun --allow-run-as-root --use-hwthread-cpus -np {number_of_cores} "
-                    "snappyHexMesh -parallel -overwrite "
-                    "2>&1 | tee log.snappyHexMesh'"
-                )
-            else:
-                snappy_cmd = (
-                    "bash -c '"
-                    "set -o pipefail; "
-                    "source /opt/openfoam13/etc/bashrc && "
-                    "snappyHexMesh -overwrite 2>&1 | tee log.snappyHexMesh'"
-                )
-
-            if not run_openfoam_command(
-                container,
-                snappy_cmd,
-                "snappyHexMesh",
-                STATUS_CALLBACK,
-                "snappyHexMesh",
-            ):
-                return False
-
-            # cfMesh operates on the root constant/polyMesh. Mesh-only cases
-            # also need a root mesh for checkMesh/ParaView. Therefore rebuild
-            # the root mesh after parallel snappy whenever either condition
-            # applies.
-            root_mesh_required = MESH_ONLY or boundary_layer_method == "cfmesh"
-
-            if parallel_run and root_mesh_required:
-                reconstruct_mesh_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "reconstructPar > log.reconstructParMesh 2>&1'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    reconstruct_mesh_cmd,
-                    "reconstructPar mesh",
-                    STATUS_CALLBACK,
-                    "reconstructPar",
-                ):
-                    return False
-
-                try:
-                    verify_openfoam_patch_exists(
-                        simulation_working_directory,
-                        "propeller",
-                    )
-                except (FileNotFoundError, ValueError) as error:
-                    report_case_stage(
-                        STATUS_CALLBACK,
-                        "meshReconstructionCheck",
-                        str(error),
-                        error=(
-                            "Parallel snappy mesh was not reconstructed to "
-                            "constant/polyMesh"
-                        ),
-                    )
-                    return False
-
-            # Keep a separate snappy baseline when cfMesh is enabled. The
-            # baseline check deliberately does not write sets because cfMesh
-            # should receive a clean reconstructed root mesh.
-            if boundary_layer_method == "cfmesh":
-                check_mesh_log_name = "log.checkMesh.snappy"
-                check_mesh_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology "
-                    "| tee log.checkMesh.snappy'"
-                )
-            elif MESH_ONLY:
-                # Mesh-only cases have already reconstructed the parallel
-                # snappy mesh to constant/polyMesh above. Run diagnostics on
-                # that root mesh and write VTK surfaces/sets so the failed
-                # checkMesh regions can be inspected directly in ParaView.
-                check_mesh_log_name = "log.checkMesh"
-                check_mesh_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology "
-                    "-writeSurfaces -surfaceFormat vtk "
-                    "-writeSets -setFormat vtk "
-                    "| tee log.checkMesh'"
-                )
-            elif parallel_run:
-                # Normal non-mesh-only snappy path: validate the actual
-                # decomposed processor meshes directly without reconstructing.
-                check_mesh_log_name = "log.checkMesh"
-                check_mesh_cmd = (
-                    "bash -c '"
-                    "set -o pipefail; "
-                    "source /opt/openfoam13/etc/bashrc && "
-                    f"mpirun --allow-run-as-root --use-hwthread-cpus "
-                    f"-np {number_of_cores} "
-                    "checkMesh -parallel -allGeometry -allTopology "
-                    "2>&1 | tee log.checkMesh'"
-                )
-            else:
-                check_mesh_log_name = "log.checkMesh"
-                check_mesh_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology "
-                    "-writeSurfaces -surfaceFormat vtk "
-                    "-writeSets -setFormat vtk "
-                    "| tee log.checkMesh'"
-                )
-
-            if not run_openfoam_command(
-                container,
-                check_mesh_cmd,
-                "checkMesh",
-                STATUS_CALLBACK,
-                "checkMesh",
-            ):
-                return False
-
-            check_mesh_log_path = (
-                simulation_working_directory / check_mesh_log_name
-            )
-            if not (is_mesh_ok(check_mesh_log_path, quiet=True) or ALLOW_BAD_MESH):
-                report_case_stage(
-                    STATUS_CALLBACK,
-                    "checkMesh",
-                    "mesh check failed and --allow-bad-mesh is not set",
-                    error="Mesh is not OK",
-                )
-                return False
-
-            # --------------------------------------------------------------
-            # cfMesh boundary-layer generation
-            # --------------------------------------------------------------
-            if boundary_layer_method == "cfmesh":
-                # The processor meshes contain the pre-cfMesh snappy result.
-                # They become invalid as soon as cfMesh modifies the root mesh,
-                # so discard them before the host-side layer operation.
-                if parallel_run:
-                    discard_snappy_processors_cmd = (
-                        "bash -c 'rm -rf processor*'"
-                    )
-                    if not run_openfoam_command(
-                        container,
-                        discard_snappy_processors_cmd,
-                        "discard pre-cfMesh processor meshes",
-                        STATUS_CALLBACK,
-                        "cfMeshPrep",
-                    ):
-                        return False
-
-                if not generate_boundary_layers(
-                    simulation_working_directory=simulation_working_directory,
-                    number_of_cores=number_of_cores,
-                    status_callback=STATUS_CALLBACK,
-                ):
-                    return False
-
-                # cfMesh/polyMeshGen rewrites constant/polyMesh and removes
-                # OpenFOAM zones. Recreate the rotating disconnected region
-                # as the cellZone required by the rotor motion solver.
-                topo_set_dict_path = (
-                    simulation_working_directory / "system" / "topoSetDict"
-                )
-                topo_set_dict_path.write_text(
-                    """FoamFile
-{
-    format      ascii;
-    class       dictionary;
-    object      topoSetDict;
-}
-
-actions
-(
-    {
-        name    rotaryRegionCells;
-        type    cellSet;
-        action  new;
-
-        source  regionToCell;
-        sourceInfo
-        {
-            insidePoints ((0.1 0 0));
-            nErode 0;
-        }
-    }
-
-    {
-        name    rotaryRegion;
-        type    cellZoneSet;
-        action  new;
-
-        source  setToCellZone;
-        sourceInfo
-        {
-            set rotaryRegionCells;
-        }
-    }
-);
-""",
-                    encoding="utf-8",
-                )
-
-                restore_rotary_zone_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "topoSet > log.restoreRotaryRegion 2>&1'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    restore_rotary_zone_cmd,
-                    "restore rotaryRegion cellZone",
-                    STATUS_CALLBACK,
-                    "restoreRotaryRegion",
-                ):
-                    return False
-
-                rotary_zone_path = (
-                    simulation_working_directory
-                    / "constant"
-                    / "polyMesh"
-                    / "cellZones"
-                )
-                try:
-                    rotary_zone_text = rotary_zone_path.read_text(
-                        encoding="utf-8",
-                        errors="ignore",
-                    )
-                except OSError as error:
-                    report_case_stage(
-                        STATUS_CALLBACK,
-                        "restoreRotaryRegion",
-                        f"could not read {rotary_zone_path}: {error}",
-                        error="rotaryRegion cellZone verification failed",
-                    )
-                    return False
-
-                if "rotaryRegion" not in rotary_zone_text:
-                    report_case_stage(
-                        STATUS_CALLBACK,
-                        "restoreRotaryRegion",
-                        "rotaryRegion was not recreated after cfMesh",
-                        error="rotaryRegion cellZone missing after cfMesh",
-                    )
-                    return False
-
-                # Final mesh validation is always performed by OpenFOAM 13,
-                # not by cfMesh's bundled OpenFOAM runtime. Surface diagnostics
-                # make skew/non-orthogonal problem locations directly
-                # inspectable in ParaView.
-                check_mesh_after_cfmesh_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "checkMesh -allGeometry -allTopology "
-                    "-writeSurfaces -surfaceFormat vtk "
-                    "-writeSets -setFormat vtk "
-                    "| tee log.checkMesh'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    check_mesh_after_cfmesh_cmd,
-                    "checkMesh after cfMesh",
-                    STATUS_CALLBACK,
-                    "checkMeshCfMesh",
-                ):
-                    return False
-
-                final_mesh_log_path = (
-                    simulation_working_directory / "log.checkMesh"
-                )
-                if not (
-                    is_mesh_ok(final_mesh_log_path, quiet=True)
-                    or ALLOW_BAD_MESH
-                ):
-                    report_case_stage(
-                        STATUS_CALLBACK,
-                        "checkMeshCfMesh",
-                        (
-                            "cfMesh-layered mesh check failed and "
-                            "--allow-bad-mesh is not set"
-                        ),
-                        error="cfMesh-layered mesh is not OK",
-                    )
-                    return False
-
-            # --mesh-only is a strict early-exit path after the requested mesh
-            # generation method and final checkMesh. Never create NCCs or run
-            # solver/postprocessing work. Keep sim.foam for direct ParaView.
             if MESH_ONLY:
-                if boundary_layer_method == "none":
-                    layer_cells_vtk_cmd = (
-                        "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                        "foamToVTK -constant -cellSet addedCells "
-                        "> log.foamToVTK.addedCells 2>&1'"
-                    )
-                    if not run_openfoam_command(
-                        container,
-                        layer_cells_vtk_cmd,
-                        "export boundary-layer cells to VTK",
-                        STATUS_CALLBACK,
-                        "layerCellsVTK",
-                    ):
-                        return False
-
-                foam_file_cmd = "bash -c 'touch sim.foam'"
-                if not run_openfoam_command(
-                    container,
-                    foam_file_cmd,
-                    "create FOAM file",
-                    STATUS_CALLBACK,
-                    "finalizing",
-                ):
-                    return False
-
+                report_case_stage(
+                    STATUS_CALLBACK, "meshOnly",
+                    "cfMesh, rotating cellZone, NCC and checks complete"
+                    + ("" if mesh_ok else " | QUALITY FAILED (explicit override)"),
+                    progress=100.0,
+                )
                 status = True
-                report_case_stage(
-                    STATUS_CALLBACK,
-                    "meshOnly",
-                    "mesh-only case complete after final checkMesh",
-                    progress=100.0,
-                )
-                report_case_stage(
-                    STATUS_CALLBACK,
-                    "openfoam_done",
-                    "OpenFOAM mesh-only stage complete",
-                    progress=100.0,
-                )
                 return True
-
-            # For a normal parallel cfMesh case, the processor meshes were
-            # intentionally discarded before layer generation. Re-decompose
-            # the final layered root mesh before NCC and the solver continue.
-            if boundary_layer_method == "cfmesh" and parallel_run:
-                clear_stale_sets_cmd = (
-                    "bash -c 'rm -rf constant/polyMesh/sets'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    clear_stale_sets_cmd,
-                    "clear stale mesh sets",
-                    STATUS_CALLBACK,
-                    "decomposeParAfterCfMeshPrep",
-                ):
-                    return False
-
-                decompose_layered_cmd = (
-                    "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                    "decomposePar -copyZero > log.decomposeParAfterCfMesh 2>&1'"
-                )
-                if not run_openfoam_command(
-                    container,
-                    decompose_layered_cmd,
-                    "decompose layered mesh",
-                    STATUS_CALLBACK,
-                    "decomposeParAfterCfMesh",
-                ):
-                    return False
-
-            if MODE == "AMI":
-                if parallel_run:
-                    ncc_cmd = (
-                        "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                        f"mpirun --oversubscribe -np {number_of_cores} "
-                        "createNonConformalCouples -parallel "
-                        "rotaryRegion_slave rotaryRegion "
-                        "> log.createNonConformalCouples 2>&1'"
-                    )
-                else:
-                    ncc_cmd = (
-                        "bash -c 'source /opt/openfoam13/etc/bashrc && "
-                        "createNonConformalCouples rotaryRegion_slave rotaryRegion "
-                        "> log.createNonConformalCouples 2>&1'"
-                    )
-
-                if not run_openfoam_command(
-                    container,
-                    ncc_cmd,
-                    "createNonConformalCouples",
-                    STATUS_CALLBACK,
-                    "createNonConformalCouples",
-                ):
-                    return False
-
             if initialize_from_previous:
                 if previous_simulation_path is None:
                     raise ValueError(
@@ -571,6 +156,11 @@ actions
                     detail=f"initializing from {Path(previous_simulation_path).name}",
                 ):
                     return False
+
+            if parallel_run:
+                docker_run(container, simulation_working_directory,
+                           ["decomposePar"], "log.decomposePar",
+                           STATUS_CALLBACK, LIVE_OUTPUT)
 
         # ------------------------------------------------------------------
         # RESUME CASE
@@ -690,6 +280,8 @@ actions
         # Mesh-only cases have already returned immediately after checkMesh.
         timestep_str = str(safe_time) if resume else "0"
         end_on_mode = str(END_ON_MODE).strip().lower()
+        if end_on_mode == "rev":
+            end_on_mode = "time"
         monitor_stop_event = threading.Event()
 
         solver_log_path = simulation_working_directory / "log.pimpleFoam"
@@ -705,6 +297,15 @@ actions
             runtime_control_dict = (
                 simulation_working_directory / "system" / "controlDict"
             )
+
+            if END_ON_VALUE is not None:
+                target_end_time = float(END_ON_VALUE)
+                if END_ON_MODE == "rev":
+                    target_end_time *= 60.0 / float(rpm_count)
+                if not math.isfinite(target_end_time) or target_end_time <= 0:
+                    raise ValueError("The requested end time must be finite and positive")
+                if not update_parameter(parameter_control_dict, "endTime", target_end_time, quiet=True):
+                    raise ValueError(f"Cannot update endTime in {parameter_control_dict}")
 
             try:
                 target_end_time = read_openfoam_scalar(
@@ -778,6 +379,7 @@ actions
             sim_run_cmd,
             "OpenFOAM solver",
             status_callback=STATUS_CALLBACK,
+            print_output=LIVE_OUTPUT,
         )
 
         if monitor_stop_event is not None:
@@ -787,6 +389,15 @@ actions
 
         if not solver_successful:
             return False
+
+        # A zero-exit process is not proof that the solver advanced any time.
+        solver_text = solver_log_path.read_text(errors="replace")
+        solved_times = re.findall(r"(?m)^Time = ([0-9.eE+-]+)", solver_text)
+        if not resume and not solved_times:
+            raise RuntimeError(
+                "OpenFOAM exited without advancing time. Check endTime, deltaT "
+                "and stale 0/uniform/time metadata."
+            )
 
         report_case_stage(STATUS_CALLBACK, "solving", "solver finished", progress=100.0)
 

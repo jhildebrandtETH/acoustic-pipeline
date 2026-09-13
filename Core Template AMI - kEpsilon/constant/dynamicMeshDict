@@ -17,7 +17,7 @@ FoamFile
 mover
 {
     type          motionSolver;
-    libs          ("libfvMeshMovers.so" "librigidBodyMeshMotion.so");
+    libs ("librigidBodyMeshMotion.so");
 
     motionSolver  motionSolverList;
 
@@ -28,7 +28,7 @@ mover
             rotor
             {
                 motionSolver    solidBody;
-                cellZone        innerCylinder;
+                cellZone        rotaryRegion;
 
                 solidBodyMotionFunction rotatingMotion;
 

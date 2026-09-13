@@ -329,11 +329,10 @@ addLayersControls
         }
     }
 
-    // Specify exactly two thickness controls: expansion and final thickness.
-    // With relativeSizes true, finalLayerThickness scales with the local cell.
+    // Absolute first-layer thickness and expansion ratio.
+    // For one layer, first-layer thickness equals the total stack thickness.
     expansionRatio      $expansionRatio;
-    finalLayerThickness $finalLayerThickness;
-
+    firstLayerThickness $firstLayerThickness;
     minThickness        $minThickness;
     nGrow               $nGrow;
 
@@ -349,10 +348,10 @@ addLayersControls
     minMedialAxisAngle        $minMedialAxisAngle;
 
     nLayerIter           $nLayerIter;
-    // Keep the normal quality limits for every layer iteration.
-    nRelaxedIter         $nLayerIter;
+    // Allow the relaxed quality limits after the initial strict iterations.
+    nRelaxedIter         $addLayersnRelaxedIter;
     nBufferCellsNoExtrude $nBufferCellsNoExtrude;
-    mergeFaces false;
+    // OpenFOAM 13 default: merge eligible faces on patches receiving layers.
 }
 
 
@@ -400,7 +399,9 @@ meshQualityControls
     minDeterminant 0.001;
 
     //- minFaceWeight (0 -> 0.5)
-    minFaceWeight 0.05;
+    // Single-layer trial: 0.05 progressively removes the 0.1 mm layer.
+    // 0.01 retained 74.8% face coverage in the 10x7E / 4000 RPM test case.
+    minFaceWeight 0.01;
 
     //- minVolRatio (0 -> 1)
     minVolRatio 0.01;

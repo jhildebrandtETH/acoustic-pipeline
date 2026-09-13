@@ -28,14 +28,14 @@ mover
             rotor
             {
                 motionSolver    solidBody;
-                cellZone        rotatingMesh;
+                cellZone        rotaryRegion;
 
                 solidBodyMotionFunction rotatingMotion;
 
                 rotatingMotionCoeffs
                 {
                     origin  (0 0 0);
-                    axis    (0 0 1);
+                    axis    (0 1 0);
                     omega   $omega_val;
                 }
             }

@@ -35,34 +35,34 @@ boundaryField
         type            calculated;
         value           uniform (0 0 0);
     }
-    innerCylinder
+    rotaryRegion
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    innerCylinder_slave
+    rotaryRegion_slave
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    propellerTip
+    propeller
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    nonConformalCyclic_on_innerCylinder
+    nonConformalCyclic_on_rotaryRegion
     {
         type            nonConformalCyclic;
     }
-    nonConformalCyclic_on_innerCylinder_slave
+    nonConformalCyclic_on_rotaryRegion_slave
     {
         type            nonConformalCyclic;
     }
-    nonConformalError_on_innerCylinder
+    nonConformalError_on_rotaryRegion
     {
         type            nonConformalError;
     }
-    nonConformalError_on_innerCylinder_slave
+    nonConformalError_on_rotaryRegion_slave
     {
         type            nonConformalError;
     }

@@ -42,18 +42,18 @@ boundaryField
         value           $internalField;
 	}
 
-    propellerTip
+    propeller
     {
         type            kqRWallFunction;
         value           $internalField;
     }
 
-    innerCylinder
+    rotaryRegion
     {
     type    zeroGradient;
     }
 
-    innerCylinder_slave
+    rotaryRegion_slave
     {
     type    zeroGradient;
     }

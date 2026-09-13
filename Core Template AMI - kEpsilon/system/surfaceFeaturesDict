@@ -16,8 +16,8 @@ FoamFile
 
 surfaces
 (
-    "propellerTip.stl"
-    "innerCylinder.stl"
+    "propeller.stl"
+    "rotaryRegion.stl"
     "outerCylinder.stl"
 );
 

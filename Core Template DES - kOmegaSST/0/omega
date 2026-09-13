@@ -11,7 +11,7 @@ FoamFile
     format      ascii;
     class       volScalarField;
     location    "0";
-    object      epsilon;
+    object      omega;
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -24,24 +24,24 @@ boundaryField
     #includeEtc "caseDicts/setConstraintTypes"
 
     
-	farfield
+	"inlet|outlet|walls"
 	{
 		type            inletOutlet;
         inletValue      uniform 1000;
         value           uniform 1000;
 	}
 
-    rotorAMI
+    rotaryRegion
     {
     type    zeroGradient;
     }
 
-    statorAMI
+    rotaryRegion_slave
     {
     type    zeroGradient;
     }
 
-    cubeWall
+    propeller
     {
         type            omegaWallFunction;
         value           uniform 1;

@@ -4,3 +4,7 @@ __pycache__/*.pyc
 
 STLs/*
 !STLs/.gitkeep
+.venv/
+**/.venv/
+__pycache__/
+*.pyc

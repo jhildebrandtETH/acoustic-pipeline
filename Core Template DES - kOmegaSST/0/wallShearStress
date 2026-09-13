@@ -20,23 +20,23 @@ internalField   uniform (0 0 0);
 
 boundaryField
 {
-    farfield
+    "inlet|outlet|walls"
     {
         type            calculated;
         value           uniform (0 0 0);
     }
     
-    rotorAMI
+    rotaryRegion
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    statorAMI
+    rotaryRegion_slave
     {
         type            calculated;
         value           uniform (0 0 0);
     }
-    cubeWall
+    propeller
     {
         type            calculated;
         value           uniform (0 0 0);

@@ -42,17 +42,17 @@ boundaryField
         value           $internalField;
 	}
 
-    innerCylinder
+    rotaryRegion
     {
     type    zeroGradient;
     }
 
-    innerCylinder_slave
+    rotaryRegion_slave
     {
     type    zeroGradient;
     }
 
-    propellerTip
+    propeller
     {
         type            epsilonWallFunction;
         value           $internalField;

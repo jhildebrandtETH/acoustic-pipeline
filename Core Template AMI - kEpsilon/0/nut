@@ -41,18 +41,18 @@ boundaryField
         value           uniform 0;
 	}
 
-    propellerTip
+    propeller
     {
         type            nutkWallFunction;
         value           uniform 0;
     }
 
-    innerCylinder
+    rotaryRegion
     {
     type    zeroGradient;
     }
 
-    innerCylinder_slave
+    rotaryRegion_slave
     {
     type    zeroGradient;
     }
