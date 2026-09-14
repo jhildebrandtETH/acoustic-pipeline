@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Installs only the host-side standalone generateBoundaryLayers binary.
+# Native utilities use Docker opencfd/openfoam-default:2512; NCC/solver use
+# Docker microfluidica/openfoam:13. No host OpenFOAM installation is required.
 set -euo pipefail
 
 CFMESH_VERSION="${CFMESH_VERSION:-1.2.0}"

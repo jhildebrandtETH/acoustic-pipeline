@@ -1,6 +1,10 @@
 """Native cfMesh rotor/stator backend for the existing acoustic-pipeline scheduler."""
 
-from functools import lru_cache
+from cfmesh_runtime import (
+    command as native_command,
+    run as native_run,
+    preflight as native_preflight,
+)
 import hashlib
 import json
 import math
@@ -51,40 +55,11 @@ def safe_path(path):
     return path
 
 
-@lru_cache(maxsize=1)
-def runtime():
-    bashrc = os.environ.get(
-        "CFTEST_FOAM_BASHRC", "/usr/lib/openfoam/openfoam2512/etc/bashrc"
-    )
-    if not Path(bashrc).is_file():
-        raise FileNotFoundError(f"cfMesh environment missing: {bashrc}")
-    environment_process = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'cfmesh_bashrc=$1; set --; source "$cfmesh_bashrc" >/dev/null; env -0',
-            "cfmesh",
-            bashrc,
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-    )
-    environment = dict(
-        entry.split("=", 1)
-        for entry in environment_process.stdout.decode().split("\0")
-        if "=" in entry
-    )
-    for name in ("cartesianMesh", "improveMeshQuality", "foamDictionary", "stdbuf"):
-        if not shutil.which(name, path=environment["PATH"]):
-            raise FileNotFoundError(f"{name} not available in {bashrc}")
-    return environment
-
-
 def query(path, entry=None):
-    command = ["foamDictionary", str(path)]
+    command = ["foamDictionary", Path(path).resolve()]
     command += ["-entry", entry, "-value"] if entry else ["-expand"]
-    dictionary_process = subprocess.run(
-        command, env=runtime(), text=True, capture_output=True
+    dictionary_process = native_run(
+        command, cwd=Path(path).resolve().parent, text=True, capture_output=True
     )
     if dictionary_process.returncode:
         raise ValueError(
@@ -100,11 +75,12 @@ def optional(path, entry):
         return None
 
 
-def parameter_file(parameters, name):
+def parameter_file(parameters, name, *, read_only=False):
     if not name or Path(name).name != name or "\\" in name or name in {".", ".."}:
         raise ValueError("Study file must be a filename in Parameters, without a path")
     for candidate in (Path(parameters) / name, Path(parameters) / (name + ".cpp")):
-        safe_path(candidate)
+        if not read_only:
+            safe_path(candidate)
         if candidate.is_file():
             return candidate
     raise ValueError(f"Study dictionary not found in {parameters}: {name}")
@@ -112,7 +88,9 @@ def parameter_file(parameters, name):
 
 def preflight(args):
     safe_path(args.sim_dir)
-    runtime()
+    native_preflight()
+    from tools import resolve_cfmesh_executable
+    resolve_cfmesh_executable()
     # Load native acoustic libraries before long-running worker threads start.
     if not args.mesh_only:
         import matplotlib
@@ -129,7 +107,7 @@ def preflight(args):
             "This native-cfMesh pipeline implements AMI/NCC rotating meshes."
         )
     if args.study:
-        path = parameter_file(ROOT / "Parameters", args.study_file)
+        path = parameter_file(ROOT / "Parameters", args.study_file, read_only=True)
         query(path, args.study_parameter)
     for name in (
         "cfmeshDomainDict",
@@ -197,9 +175,9 @@ def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=No
     if study:
         filename, entry, value = study
         study_path = parameter_file(parameters_directory, filename)
-        subprocess.run(
-            ["foamDictionary", str(study_path), "-entry", entry, "-set", str(value)],
-            env=runtime(),
+        native_run(
+            ["foamDictionary", study_path, "-entry", entry, "-set", str(value)],
+            cwd=case,
             check=True,
             stdout=subprocess.DEVNULL,
         )
@@ -405,7 +383,7 @@ interpolationSchemes { default linear; } snGradSchemes { default corrected; }
     (case / "sim.foam").touch()
 
 
-def host_run(case, role, command, cores, callback, live):
+def native_mesh_run(case, role, command, cores, callback, live):
     from tools import report_case_stage
 
     region_directory = case / "cfmesh" / role
@@ -413,17 +391,13 @@ def host_run(case, role, command, cores, callback, live):
     report_case_stage(
         callback, f"cfMesh.{role}.{stage}", f"{role}: {shlex.join(command)}"
     )
-    environment = runtime().copy()
-    environment["OMP_NUM_THREADS"] = str(cores)
-    environment["PWD"] = str(region_directory)
     with (region_directory / f"log.{stage}").open("w") as log, (
         case / "log.cfmesh"
     ).open("a") as all_log:
         all_log.write(f"\n[{role}] + {shlex.join(command)}\n")
         process = subprocess.Popen(
-            ["stdbuf", "-oL", "-eL", *command],
+            native_command(command, cwd=region_directory, cores=cores),
             cwd=region_directory,
-            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -437,6 +411,7 @@ def host_run(case, role, command, cores, callback, live):
             if live:
                 with OUTPUT_LOCK:
                     print(f"[{case.name}/{role}] {line}", end="", flush=True)
+        process.stdout.close()
         if process.wait():
             raise RuntimeError(f"{role} {stage} failed: {region_directory}/log.{stage}")
 
@@ -486,16 +461,16 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
         effective = query(mesh_dictionary)
         write(region_directory / "system/meshDict", effective + "\n")
         if layers == "none" or (layers == "cfmesh" and role == "stator"):
-            subprocess.run(
+            native_run(
                 [
                     "foamDictionary",
-                    str(mesh_dictionary),
+                    mesh_dictionary,
                     "-entry",
                     "workflowControls",
                     "-set",
                     "{ stopAfter edgeExtraction; }",
                 ],
-                env=runtime(),
+                cwd=case,
                 check=True,
                 stdout=subprocess.DEVNULL,
             )
@@ -504,15 +479,15 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
             and role == "rotor"
             and optional(mesh_dictionary, "workflowControls") is not None
         ):
-            subprocess.run(
+            native_run(
                 [
                     "foamDictionary",
-                    str(mesh_dictionary),
+                    mesh_dictionary,
                     "-entry",
                     "workflowControls",
                     "-remove",
                 ],
-                env=runtime(),
+                cwd=case,
                 check=True,
                 stdout=subprocess.DEVNULL,
             )
@@ -521,12 +496,12 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
             raise ValueError(
                 "Only a complete cfMesh run or stopAfter edgeExtraction is supported"
             )
-        host_run(case, role, ["cartesianMesh"], cores, callback, live)
+        native_mesh_run(case, role, ["cartesianMesh"], cores, callback, live)
         if stop:
             log_text = (region_directory / "log.cartesianMesh").read_text()
             if "Stopping after step edgeExtraction" not in log_text:
                 raise RuntimeError("Mesher did not honour the required no-layer stop")
-            host_run(
+            native_mesh_run(
                 case,
                 role,
                 [

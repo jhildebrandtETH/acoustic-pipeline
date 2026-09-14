@@ -1,6 +1,6 @@
 # Native cfMesh acoustic pipeline (experimental duplicate)
 
-This directory is the independent copy `C:\repos\acoustic-pipeline-cfmesh-standalone-test-20260911`. The original `C:\repos\acoustic-pipeline` is not an output location and must remain untouched. Orders may live inside this duplicate or outside it, including `/home/jonas/run/` and mounted Windows drives. The launcher rejects output paths inside the original repository (including resolved links and Windows path case variants), foreign pipeline orders, and the pipeline/filesystem root itself.
+This branch is developed in `C:\repos\acoustic-pipeline`. Use an external simulation directory, such as `~/run/`, when running from this checkout: the existing original-repository output guard remains enabled, including resolved links and Windows path case variants. Foreign pipeline orders and the pipeline/filesystem root are also rejected. See the runtime setup commands below before the first run.
 
 The familiar `main.py` scheduler now meshes separate rotor and stator fluid volumes with cfMesh, merges them, creates the `rotaryRegion` cell zone and Foundation OpenFOAM 13 NCC interface, and then runs the rotating solver, surface sampling, FW-H acoustics and PDF report. `--mode AMI` is the existing command-line name; the actual coupling is NCC. MRF is not implemented. No blockMesh/snappyHexMesh or hybrid layer grafting runs in this route.
 
@@ -10,18 +10,18 @@ If a WSL terminal retains a stale working-directory handle after a folder is mov
 
 ```bash
 cd /
-cd /mnt/c/repos/acoustic-pipeline-cfmesh-standalone-test-20260911
+cd /mnt/c/repos/acoustic-pipeline
 ```
 
-The launcher resolves its own Python modules explicitly, including with `PYTHONSAFEPATH`, `python -P`, or `python -I`. A `ModuleNotFoundError: No module named tools` at startup is unrelated to simulation-directory reuse. Run the `main.py` in this updated duplicate; do not copy `main.py` alone into the order folder.
+The launcher resolves its own Python modules explicitly, including with `PYTHONSAFEPATH`, `python -P`, or `python -I`. A `ModuleNotFoundError: No module named tools` at startup is unrelated to simulation-directory reuse. Run the `main.py` in this checkout; do not copy `main.py` alone into the order folder.
 
 Start Docker Desktop with Ubuntu/WSL integration enabled. In Ubuntu:
 
 ```bash
-cd /mnt/c/repos/acoustic-pipeline-cfmesh-standalone-test-20260911
+cd /mnt/c/repos/acoustic-pipeline
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate of_pipeline_env
-python main.py --sim-dir ./orders/cfmesh_layers3 --rpms 4000 --mode AMI \
+python main.py --sim-dir ~/run/cfmesh_layers3 --rpms 4000 --mode AMI \
   --turbulence kOmegaSST --total-cores 4 --mesh-only --live-output
 ```
 
@@ -42,7 +42,7 @@ Fresh cases also discard the template's saved `0/uniform/time`, which otherwise 
 For a short diagnostic check of the complete launcher, with the current dictionaries:
 
 ```bash
-cd /mnt/c/repos/acoustic-pipeline-cfmesh-standalone-test-20260911
+cd /mnt/c/repos/acoustic-pipeline
 python main.py --sim-dir ~/run/cfmesh_flow_check \
   --rpms 4000 --mode AMI --turbulence kOmegaSST --total-cores 8 \
   --acoustic-surface impermeable --end-on time 3.6e-8 \
@@ -101,9 +101,9 @@ Full-pipeline patch names match the original solver: `propeller`, `inlet`, `outl
 Create a fresh order for a full run after inspecting mesh quality:
 
 ```bash
-mkdir -p orders/cfmesh_full/STL
-cp cfmesh_test/input/fused.stl orders/cfmesh_full/STL/10x7E.stl
-python main.py --sim-dir ./orders/cfmesh_full --rpms 4000 --mode AMI \
+mkdir -p ~/run/cfmesh_full/STL
+cp cfmesh_test/input/fused.stl ~/run/cfmesh_full/STL/10x7E.stl
+python main.py --sim-dir ~/run/cfmesh_full --rpms 4000 --mode AMI \
   --turbulence kOmegaSST --total-cores 4 --acoustic-surface impermeable \
   --end-on rev 10 --live-output
 ```
@@ -125,16 +125,16 @@ For multiple RPMs use e.g. `--rpms 3000 4000 5000`. `--field-init on` preserves 
 External order example (Ubuntu/WSL, with `of_pipeline_env` activated):
 
 ```bash
-python /mnt/c/repos/acoustic-pipeline-cfmesh-standalone-test-20260911/main.py \
+python /mnt/c/repos/acoustic-pipeline/main.py \
   --sim-dir /home/jonas/run/cfmesh_refined \
   --rpms 4000 --mode AMI --turbulence kOmegaSST \
   --total-cores 24 --mesh-only --live-output
 ```
 
-A mounted Windows folder is also accepted, for example `--sim-dir /mnt/c/CFD/cfmesh_refined`. Quote paths containing spaces. An existing `STL/` is used as supplied; an empty order receives the previously selected propeller. Existing directories, including directories containing only `STL/` or leftover case folders, are accepted. Only an existing `simulation_order.json` requires `--resume`. Parameters and templates still come from this duplicate.
+A mounted Windows folder is also accepted, for example `--sim-dir /mnt/c/CFD/cfmesh_refined`. Quote paths containing spaces. An existing `STL/` is used as supplied; an empty order receives the previously selected propeller. Existing directories, including directories containing only `STL/` or leftover case folders, are accepted. Only an existing `simulation_order.json` requires `--resume`. Parameters and templates still come from this checkout.
 
 ```bash
-python main.py --sim-dir ./orders/cfmesh_layers3 --resume --live-output
+python main.py --sim-dir ~/run/cfmesh_layers3 --resume --live-output
 ```
 
 **New order (without `--resume`):** the same `--sim-dir` is accepted whenever it contains no `simulation_order.json`. It may already contain `STL/`, unrelated files or old case folders. A case with the same name is preserved as `<case>_PREVIOUS_<timestamp>` before its replacement is installed. Templates are copied under a temporary sibling name and then renamed into place; this avoids the WSL mounted-drive failure where a deleted case directory is invisible but creating its old name raises `FileExistsError`.
@@ -142,8 +142,8 @@ python main.py --sim-dir ./orders/cfmesh_layers3 --resume --live-output
 **Existing order:** any `simulation_order.json` (including an empty or failed order) prevents a new order from overwriting it. Use `--resume` to continue. To intentionally start again with new options in the same directory, move the order file aside first, for example:
 
 ```bash
-mv ./orders/cfmesh_layers3/simulation_order.json \
-  ./orders/cfmesh_layers3/simulation_order.previous.$(date +%Y%m%d_%H%M%S_%N).json
+mv ~/run/cfmesh_layers3/simulation_order.json \
+  ~/run/cfmesh_layers3/simulation_order.previous.$(date +%Y%m%d_%H%M%S_%N).json
 # Then run your normal command with the same --sim-dir.
 ```
 
@@ -154,9 +154,9 @@ To switch mesh-only to a full simulation, move the existing order JSON aside as 
 For a mesh study (one STL and one RPM in a new order):
 
 ```bash
-mkdir -p orders/cfmesh_study/STL
-cp cfmesh_test/input/fused.stl orders/cfmesh_study/STL/10x7E.stl
-python main.py --sim-dir ./orders/cfmesh_study --rpms 4000 --mode AMI \
+mkdir -p ~/run/cfmesh_study/STL
+cp cfmesh_test/input/fused.stl ~/run/cfmesh_study/STL/10x7E.stl
+python main.py --sim-dir ~/run/cfmesh_study --rpms 4000 --mode AMI \
   --turbulence kOmegaSST --total-cores 4 --mesh-only --study \
   --study-file cfmeshCommon --study-parameter propellerCellSize \
   --study-values '0.00125...0.000625' --live-output
@@ -169,13 +169,12 @@ Studies accept existing files in `Parameters`, including `cfmeshCommon`, `cfmesh
 For the first order, after meshing (including a run stopped on quality):
 
 ```bash
-cd /mnt/c/repos/acoustic-pipeline-cfmesh-standalone-test-20260911/orders/cfmesh_layers3/10x7E_4000RPM_AMI
+cd ~/run/cfmesh_layers3/10x7E_4000RPM_AMI
 touch sim.foam
-source /usr/lib/openfoam/openfoam2512/etc/bashrc
-paraFoam -builtin
+paraview sim.foam
 ```
 
-`paraFoam` requires an accessible ParaView executable. This machine currently has Windows ParaView, so the direct alternative from WSL is:
+`paraview` requires an accessible ParaView executable. This machine currently has Windows ParaView, so the direct alternative from WSL is:
 
 ```bash
 "/mnt/c/Program Files/ParaView 6.1.0/bin/paraview.exe" --data="$(wslpath -w "$PWD/sim.foam")"
@@ -188,13 +187,42 @@ Or use Windows ParaView > File > Open and select the case's `sim.foam`. Choose t
 - `pipeline-native-fault.log` in the order directory: unexpected native faults in the launcher.
 - `<case>.preprocessing.log` in the order directory: preprocessing output and native fault traces.
 - `case/cfmesh/log.interfaceProjection`, `interface-projection.json`: cylindrical correction and its displacement limit.
-- `case/log.cfmesh`: aggregate native meshing log; `case/cfmesh/{rotor,stator}/log.*`: individual host commands.
+- `case/log.cfmesh`: aggregate native meshing log; `case/cfmesh/{rotor,stator}/log.*`: individual native-container commands.
 - `case/log.checkMesh`, `log.checkMesh.NCC`, `log.createNonConformalCouples`, `log.pimpleFoam`: mesh/coupling/flow evidence.
 - `case/cfmesh/geometry.json`, `mesh-status.json`, `ncc-status.json`: dimensions, acceptance and interface overlap.
 - `case/postProcessing/`: forces, residuals and sampled acoustic VTK surfaces.
 - `case/report/spl_spectrum.png` and `simulation_report.pdf`: acoustic spectrum/report after a full run.
 
-Host meshing uses the installed OpenFOAM v2512 cfMesh environment, sourced automatically from `/usr/lib/openfoam/openfoam2512/etc/bashrc` (override with `CFTEST_FOAM_BASHRC`). Assembly, NCC and solving use the existing Docker image `microfluidica/openfoam:13`. Python uses the existing `of_pipeline_env`. No shared environment or original repository changes are required.
+Native `cartesianMesh`, `improveMeshQuality` and every `foamDictionary` query/edit run in Docker image `opencfd/openfoam-default:2512`. No host OpenFOAM v2512 installation or `CFTEST_FOAM_BASHRC` is needed. Repository and case paths are bind-mounted read/write, including external `--sim-dir` paths and study dictionaries. Linux containers use the invoking user's UID/GID. Host case paths containing spaces receive whitespace-free container aliases for OpenFOAM. Live output and stage logs are retained.
+
+The standalone `generateBoundaryLayers` executable remains host-side: the existing `CFMESH_BIN` / PATH / `~/.local/cfmesh` resolver is unchanged. Run `bash setup_cfmesh.sh` once if that binary is not already installed; rerunning the script verifies an existing installation. The native rotor workflow still uses its existing built-in cfMesh layer settings. Assembly, NCC, solver and remaining Foundation utilities continue to use `microfluidica/openfoam:13`. Python uses the existing `of_pipeline_env`.
+
+On the Linux server, from this branch's repository directory:
+
+```bash
+git switch cfmesh-standalone
+git pull --ff-only
+conda activate of_pipeline_env
+docker pull opencfd/openfoam-default:2512
+docker image inspect microfluidica/openfoam:13 >/dev/null
+bash setup_cfmesh.sh
+python cfmesh_runtime.py --smoke-test
+CFMESH_DOCKER_TESTS=1 python test_cfmesh_runtime.py
+python -c 'from tools import resolve_cfmesh_executable; print(resolve_cfmesh_executable())'
+```
+
+If the Foundation image is absent, run `docker pull microfluidica/openfoam:13`. The smoke test runs all three native utilities with `-help`, queries and edits an included dictionary, and verifies host-visible polyMesh writes in temporary repository-local and external cases. It launches no mesh. Pipeline preflight also checks Docker, both images, the three utilities and the host binary. Docker pulls v2512 automatically if absent.
+
+Use an external order directory (the existing original-repository output guard is retained):
+
+```bash
+mkdir -p "$HOME/run/cfmesh_docker2512/STL"
+cp cfmesh_test/input/fused.stl "$HOME/run/cfmesh_docker2512/STL/10x7E.stl"
+python main.py --sim-dir "$HOME/run/cfmesh_docker2512" --rpms 4000 --mode AMI \
+  --turbulence kOmegaSST --total-cores 4 --mesh-only --live-output
+```
+
+Use a fresh order directory for a new run, or `--resume` for an existing order. This is the full propeller mesh and may take time; the smoke test above is the lightweight runtime check.
 
 The optional ParaView report atlas currently reports unavailable because headless `pvpython`/`pvbatch` is not installed on the WSL host; the acoustic spectrum and PDF still generate. Interactive Windows ParaView viewing works independently. Keep optional visualization settings in the existing visualization configuration, or configure a compatible renderer if atlas images are needed.
 
