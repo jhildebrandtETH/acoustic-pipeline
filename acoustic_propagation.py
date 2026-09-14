@@ -144,7 +144,7 @@ def run_acoustic_solver(
     with MATPLOTLIB_LOCK:
         ax = plot_spl_spectrum(
             result,
-            rotations=5.0,
+            rotations=15.0,
             blade_count=2,
         )
         fig = ax.figure if hasattr(ax, "figure") else plt.gcf()

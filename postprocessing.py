@@ -1,4 +1,3 @@
-from acoustic_propagation import run_acoustic_solver
 from createSimulationReport import create_simulation_report
 from visualization import run_visualization
 from tools import MATPLOTLIB_LOCK
@@ -13,6 +12,7 @@ def postprocessing(
     MODE,
     TURBULENCE_MODEL,
     STATUS_CALLBACK=None,
+    AERODYNAMICS_ONLY=False,
 ):
     emit_status(
         STATUS_CALLBACK,
@@ -21,12 +21,23 @@ def postprocessing(
         progress=0.0,
     )
 
-    run_acoustic_solver(
-        ACOUSTIC_SURFACE,
-        SIMULATION_WORKING_DIRECTORY,
-        RPM_COUNT,
-        STATUS_CALLBACK=STATUS_CALLBACK,
-    )
+    if AERODYNAMICS_ONLY:
+        from pathlib import Path
+        import json
+        report = Path(SIMULATION_WORKING_DIRECTORY) / "report"
+        report.mkdir(parents=True, exist_ok=True)
+        (report / "acoustic-status.json").write_text(json.dumps({
+            "status": "skipped", "detail": "Acoustics disabled by --aerodynamics-only."
+        }))
+        ACOUSTIC_SURFACE = None
+    else:
+        from acoustic_propagation import run_acoustic_solver
+        run_acoustic_solver(
+            ACOUSTIC_SURFACE,
+            SIMULATION_WORKING_DIRECTORY,
+            RPM_COUNT,
+            STATUS_CALLBACK=STATUS_CALLBACK,
+        )
 
     emit_status(
         STATUS_CALLBACK,
@@ -61,6 +72,7 @@ def postprocessing(
             rpm=RPM_COUNT,
             mode=MODE,
             quiet=True,
+            aerodynamics_only=AERODYNAMICS_ONLY,
         )
 
     emit_status(

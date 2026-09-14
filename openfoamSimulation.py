@@ -5,21 +5,19 @@ from pathlib import Path
 
 import docker
 
-from cfmesh import generate_boundary_layers
+from cfmesh import cfmesh
 from tools import _run_reconstruction_with_progress
 from tools import ensure_case_core_configuration
 from tools import remove_stale_stopped_container
 from tools import report_case_stage
 from tools import run_openfoam_command
 from tools import get_safe_timestep
-from tools import is_mesh_ok
 from tools import processor_deletion_is_safe
 from tools import read_openfoam_scalar
 from tools import reconstructed_history_is_complete
 from tools import run_convergence_monitor
 from tools import run_time_progress_monitor
 from tools import safe_exec
-from tools import verify_openfoam_patch_exists
 from tools import update_parameter
 
 
@@ -122,8 +120,8 @@ def openfoamSimulation(
         # NEW CASE: mesh preparation
         # ------------------------------------------------------------------
         if not resume:
-            from cfmesh_pipeline import run_mesh, docker_run
-            mesh_ok = run_mesh(
+            from tools.cfmesh_pipeline import docker_run
+            mesh_ok = cfmesh(
                 container, simulation_working_directory, number_of_cores,
                 boundary_layer_method, ALLOW_BAD_MESH, STATUS_CALLBACK, LIVE_OUTPUT,
             )

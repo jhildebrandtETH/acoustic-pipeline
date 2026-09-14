@@ -1,245 +1,422 @@
-# Native cfMesh acoustic pipeline (experimental duplicate)
+# Acoustic Pipeline
 
-This branch is developed in `C:\repos\acoustic-pipeline`. Use an external simulation directory, such as `~/run/`, when running from this checkout: the existing original-repository output guard remains enabled, including resolved links and Windows path case variants. Foreign pipeline orders and the pipeline/filesystem root are also rejected. See the runtime setup commands below before the first run.
+**From propeller geometry to aerodynamic results and aeroacoustic predictions.**
 
-The familiar `main.py` scheduler now meshes separate rotor and stator fluid volumes with cfMesh, merges them, creates the `rotaryRegion` cell zone and Foundation OpenFOAM 13 NCC interface, and then runs the rotating solver, surface sampling, FW-H acoustics and PDF report. `--mode AMI` is the existing command-line name; the actual coupling is NCC. MRF is not implemented. No blockMesh/snappyHexMesh or hybrid layer grafting runs in this route.
+The pipeline prepares OpenFOAM cases, meshes the rotor and surrounding fluid with
+cfMesh, runs the flow solver, and produces plots, ParaView views and a PDF report.
+Acoustic runs additionally sample a FW-H surface and predict sound at an observer.
+Use `--aerodynamics-only` when you only need the flow solution and aerodynamic loads.
 
-## First command: mesh the supplied propeller
-
-If a WSL terminal retains a stale working-directory handle after a folder is moved or recreated, the launcher now re-enters the shell's absolute `PWD` before resolving paths. If that location no longer exists, it exits with a short recovery instruction. You can refresh the terminal manually:
-
-```bash
-cd /
-cd /mnt/c/repos/acoustic-pipeline
+```text
+STL + case settings
+        |
+        v
+Case preparation -> cfMesh -> mesh checks -> OpenFOAM flow solution
+                                  |                    |
+                           --mesh-only                 v
+                                                 Flow results
+                                                       |
+                                     Optional FW-H acoustic prediction
+                                                       |
+                                             Figures + PDF report
 ```
 
-The launcher resolves its own Python modules explicitly, including with `PYTHONSAFEPATH`, `python -P`, or `python -I`. A `ModuleNotFoundError: No module named tools` at startup is unrelated to simulation-directory reuse. Run the `main.py` in this checkout; do not copy `main.py` alone into the order folder.
+[Installation](#installation) · [First run](#first-run) · [Model selection](#model-selection)
+· [Run options](#run-options) · [Results](#results-and-reports) · [Troubleshooting](#troubleshooting)
 
-Start Docker Desktop with Ubuntu/WSL integration enabled. In Ubuntu:
+## Installation
 
-```bash
-cd /mnt/c/repos/acoustic-pipeline
-source ~/miniforge3/etc/profile.d/conda.sh
-conda activate of_pipeline_env
-python main.py --sim-dir ~/run/cfmesh_layers3 --rpms 4000 --mode AMI \
-  --turbulence kOmegaSST --total-cores 4 --mesh-only --live-output
-```
+### 1. Prepare the host
 
-An empty `--sim-dir` (or empty `STL/`) is seeded automatically as `STL/10x7E.stl` from the selected `Downloads/APC10x7E 1/APC10x7E/fused.stl`, in metres. No FEATURES directory is needed. The name is only a label; dimensions come from the actual STL. Geometry assumes the shaft is the Y axis through the origin.
+Run the pipeline in **Linux or a Linux distribution under WSL 2**. Use a Linux
+terminal for all commands below. Native Windows Python is not the supported full
+pipeline runtime; order locking and the standalone cfMesh helper require Linux.
 
-`--mesh-only` performs volume meshing, zone/interface assembly and checks, then stops before flow/acoustics. By default a failed strict checkMesh stops before NCC/solver. The earlier no-layer propeller baseline had **six failed strict checks**; do not mistake the completed diagnostic run for an accepted production mesh. Inspect `log.checkMesh` and refine/adjust the mesh. `--allow-bad-mesh` explicitly permits diagnostic continuation, but cannot override wrong volume, missing regions/patches or inadequate initial interface overlap.
+You need Git, Conda, Docker, and `curl` or `wget` plus `tar`. Allocate enough RAM and
+disk space for the mesh, concurrent cases, saved timesteps and acoustic samples.
+`--total-cores` limits CPU allocation; it does not impose a memory limit.
 
-`--live-output` streams full command output; omit it for the usual dashboard. Logs are saved either way. Several concurrent cases can interleave terminal output, so each case's log is authoritative.
-
-## Bounded full-pipeline check, including solving
-
-The launcher now runs geometry preparation and cylindrical-interface projection in separate Python processes. This avoids the reproduced native NumPy `invalid pointer` abort in a scheduler worker. Native faults are captured in logs and reported as case failures. The normal dashboard and `--live-output` remain available.
-
-Both cfMesh interface surfaces are projected onto the same exact circular cylinder before `checkMesh` and NCC creation. The correction is limited to the polygon-to-circle approximation error; it cannot repair an incorrectly meshed interface. For the supplied propeller, the maximum correction was about 12.34 micrometres, and minimum initial NCC coverage increased from about 64% to over 98%. The existing 95% minimum-face and 99.9% average-coverage requirements remain enforced.
-
-Fresh cases also discard the template's saved `0/uniform/time`, which otherwise overrides the configured initial timestep. A fresh solver run that exits without advancing time is now a failure.
-
-For a short diagnostic check of the complete launcher, with the current dictionaries:
-
-```bash
-cd /mnt/c/repos/acoustic-pipeline
-python main.py --sim-dir ~/run/cfmesh_flow_check \
-  --rpms 4000 --mode AMI --turbulence kOmegaSST --total-cores 8 \
-  --acoustic-surface impermeable --end-on time 3.6e-8 \
-  --allow-bad-mesh --study --study-file controlDict \
-  --study-parameter writeInterval --study-values 3 --live-output
-```
-
-This uses the ordinary parameter-study mechanism to save the final field after three startup steps, without changing the root dictionaries. It is a startup check, **not a developed-flow or acoustic validation**. The actual propeller mesh still has failed strict geometry checks; `--allow-bad-mesh` explicitly permits this diagnostic run. The checks and reports retain those failures. Three layers remain configured on the propeller. A trial enabling additional layer smoothing worsened other quality measures and was not adopted.
-
-The acoustic surface fields are sampled during short runs. If fewer than five rotations are available, postprocessing records `report/acoustic-status.json` as `insufficient_duration`, skips the spectrum, and continues the other reports. A production spectrum still needs five fully arrived rotations, including propagation delay, after suitable flow settling. Other acoustic errors remain failures.
-
-For your usual longer run, edit `Parameters/controlDict.cpp`, omit the study options, and choose your intended `--end-on` condition. Keep or omit `--allow-bad-mesh` deliberately; without it, the current propeller mesh stops at the strict quality checks. Use `--resume` only to continue the stored order, whose mesh-only/full-run settings remain unchanged.
-
-## Dictionaries to edit
-
-Edit the root `Parameters/`, then run the normal command again. Each new case receives a snapshot. A new order starts with current dictionaries. If `simulation_order.json` already exists, use `--resume` or move that file aside before creating a new order.
-
-| File | Controls |
+| Host | Docker setup |
 | --- | --- |
-| `Parameters/cfmeshCommon.cpp` | Background, propeller, interface, cylinder and sphere cell sizes (metres); propeller refinement thickness |
-| `Parameters/cfmeshRefinementDict` | Sphere diameter factor and the original cylinder radius/height/wake-offset factors |
-| `Parameters/cfmeshDomainDict` | STL scale, farfield box corners, rotor radius relative to measured propeller span, cylinder half-length and segments |
-| `Parameters/cfmeshRotorDict` | Complete native rotor meshDict: local/object refinement, native boundary layers and workflow controls |
-| `Parameters/cfmeshStatorDict` | Complete native stator meshDict: local/object refinement and workflow controls |
-| Existing `Parameters/controlDict.cpp`, solver/turbulence dictionaries | Time controls, numerical settings, field and solver parameters |
+| Linux workstation/server | Install [Docker Engine](https://docs.docker.com/engine/install/) for your distribution and configure access for your simulation account. |
+| Windows + WSL 2 | Install [Docker Desktop with the WSL 2 backend](https://docs.docker.com/desktop/features/wsl/), enable your distribution under **Settings > Resources > WSL Integration**, and use Linux containers. Keep Docker Desktop running. |
 
-The default rotor dictionary now enables **three native cfMesh boundary layers** at `propeller`, with `thicknessRatio 1.2`. Edit `boundaryLayers/patchBoundaryLayers/propeller` in `cfmeshRotorDict` to change these settings. The stator retains its no-layer stop. The full rotor workflow also inserts a base layer at its interface.
-
-`allowDiscontinuity 1` allows local layer termination at difficult features; requesting three layers is not a guarantee of three intact layers everywhere. Inspect the propeller mesh and quality log, especially near the trailing edge and root. Initial layer thickness follows the native base-layer geometry; this configuration does not prescribe a target y+.
-
-For a no-layer comparison, rerun with `--boundary-layers none`. cfMesh inserts an automatic base layer during its full workflow, so `nLayers 0` does not suppress that stage. The no-layer option stops at `edgeExtraction`, followed by `improveMeshQuality -nLoops 2 -nIterations 20 -nSurfaceIterations 0`.
-
-`--boundary-layers dict` is the default and obeys the dictionaries. `--boundary-layers none` forces both no-layer stops. `--boundary-layers cfmesh` enables the complete rotor workflow with the dictionary's layer settings and keeps the stator without layers. Only complete workflows or the supported `edgeExtraction` stop are accepted.
-
-Both mesh dictionaries include generated native `objectRefinements` for the rotor volume, inner cylinder, outer cylinder and sphere. They use the same physical coordinates on both sides of the interface. Additional custom objects can be added inside either `objectRefinements` block. Edit the source dictionaries rather than `cfmeshRegions.generated`, which is regenerated per case.
-
-The shapes reproduce normal kOmegaSST-AMI preprocessing. With `D` the measured propeller span and `R = 0.5 × sphereDiameterFactor × D`:
-
-| Region | Radius | Y extent |
-| --- | --- | --- |
-| Rotor | `0.6D` | `-0.025` to `+0.025` m |
-| Inner cylinder | `0.6R` | `-0.38R` to `+0.14R` |
-| Outer cylinder | `0.8R` | `-0.48R` to `+0.24R` |
-| Acoustic/refinement sphere | `R` | Centred at the origin |
-
-The two refinement cylinders share the original wake offset `-0.12R`. The sphere diameter factor defaults to 2.5; in permeable runs `--acoustic-sphere-diameter` controls the sampling sphere and these refinement dimensions together. Mesh-only and impermeable runs also have the refinement regions, with the factor read from `cfmeshRefinementDict`; the original preprocessing's undefined sphere-radius problem in impermeable mode is avoided. Reference STLs are written in `constant/triSurface` for viewing. The sampling sphere uses the original six subdivisions.
-
-Current cfMesh targets preserve your edited 10 mm background, 1.25 mm propeller and 6.25 mm interface settings, and add 3.125 mm rotor/inner-cylinder targets and 6.25 mm outer-cylinder/sphere targets. Propeller distance refinement extends 12.5 mm, matching the original two equal-level distance bands. The finest overlapping request wins, so a volume region can refine an interface beyond its surface-only size. These preserve the region hierarchy; they are not an exact translation of snappy levels because the normal base mesh is anisotropic (`16 × 48 × 16`) while this cfMesh setup uses cubic refinement. All target sizes remain independently editable.
-
-The three-layer baseline keeps `nLayers 3`, `thicknessRatio 1.2`, and `allowDiscontinuity 1`. An optional `maxFirstLayerThickness 0.0001` is commented out: testing the cap produced approximately 0.1 mm first layers but a much thicker last layer. Leave it disabled for the smoother initial three-layer test. This does not establish a target y+.
-
-Full-pipeline patch names match the original solver: `propeller`, `inlet`, `outlet`, `walls`, `rotaryRegion`, `rotaryRegion_slave`. The older standalone test retains `propellerSurface`/`farfield`. The farfield box has the original inlet/outlet/walls boundary-condition types; changing these physical conditions requires changing the field templates too.
-
-## Full rotation, solver and acoustics
-
-Create a fresh order for a full run after inspecting mesh quality:
+Verify access from the **same Linux terminal** that will run the pipeline:
 
 ```bash
-mkdir -p ~/run/cfmesh_full/STL
-cp cfmesh_test/input/fused.stl ~/run/cfmesh_full/STL/10x7E.stl
-python main.py --sim-dir ~/run/cfmesh_full --rpms 4000 --mode AMI \
-  --turbulence kOmegaSST --total-cores 4 --acoustic-surface impermeable \
-  --end-on rev 10 --live-output
+docker info
+docker run --rm hello-world
 ```
 
-Ten revolutions is a convenient finite run, not evidence of flow convergence. The existing acoustic spectrum uses five fully arrived rotations, so very short solver runs cannot produce that spectrum. Choose a sufficiently long settled sampling interval for thesis results. `--end-on convergence`, `force_convergence`, `residual_convergence`, or `time SECONDS` remain available. Turbulence choices are `kOmegaSST`, `kEpsilon`, and `DES`; `--cores` remains an alias for `--total-cores`.
+Both commands must succeed without changing to another account. The Python Docker
+client also needs access to that same daemon. On WSL, keep cases in the Linux
+filesystem (for example `~/simulations`) when possible to reduce file I/O overhead.
 
-For the fixed permeable sphere, replace the acoustic options with:
+### 2. Clone the repository and acoustic solver
 
 ```bash
---acoustic-surface permeable --acoustic-sphere-diameter 2.5
+git clone --recurse-submodules https://github.com/jhildebrandtETH/acoustic-pipeline.git
+cd acoustic-pipeline
 ```
 
-The diameter is a multiple of the measured propeller span. The sphere must fit inside the box and enclose the propeller. Its FW-H geometry is stationary; the impermeable propeller uses rotating geometry. Surface sampling is selected automatically in each turbulence template.
-
-For multiple RPMs use e.g. `--rpms 3000 4000 5000`. `--field-init on` preserves the existing sequential RPM chain and maps the previous fields before parallel decomposition; `off` allows independent cases.
-
-## Retry and parameter studies
-
-External order example (Ubuntu/WSL, with `of_pipeline_env` activated):
+For an existing checkout:
 
 ```bash
-python /mnt/c/repos/acoustic-pipeline/main.py \
-  --sim-dir /home/jonas/run/cfmesh_refined \
-  --rpms 4000 --mode AMI --turbulence kOmegaSST \
-  --total-cores 24 --mesh-only --live-output
+git submodule update --init --recursive
 ```
 
-A mounted Windows folder is also accepted, for example `--sim-dir /mnt/c/CFD/cfmesh_refined`. Quote paths containing spaces. An existing `STL/` is used as supplied; an empty order receives the previously selected propeller. Existing directories, including directories containing only `STL/` or leftover case folders, are accepted. Only an existing `simulation_order.json` requires `--resume`. Parameters and templates still come from this checkout.
+`acousticSolver/` is a Git submodule. It must be populated before creating the
+Python environment because the environment installs it as an editable package.
+
+### 3. Create the Python environment
+
+Install [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install)
+or another Conda distribution **inside Linux/WSL**, then run from the repository root:
 
 ```bash
-python main.py --sim-dir ~/run/cfmesh_layers3 --resume --live-output
+conda env create -f of_pipeline_env.yml
+conda activate of_pipeline_env
+python -m pip check
+python main.py --help
 ```
 
-**New order (without `--resume`):** the same `--sim-dir` is accepted whenever it contains no `simulation_order.json`. It may already contain `STL/`, unrelated files or old case folders. A case with the same name is preserved as `<case>_PREVIOUS_<timestamp>` before its replacement is installed. Templates are copied under a temporary sibling name and then renamed into place; this avoids the WSL mounted-drive failure where a deleted case directory is invisible but creating its old name raises `FileExistsError`.
+The [environment file](of_pipeline_env.yml) specifies Python 3.12, the Docker SDK,
+geometry and reporting dependencies, CPU PyTorch, and the local acoustic package.
+A GPU is not required. Keep the environment file and submodule revision together
+when sharing a reproducible checkout. See [Conda environment creation](https://docs.conda.io/projects/conda/en/stable/commands/env/create.html).
 
-**Existing order:** any `simulation_order.json` (including an empty or failed order) prevents a new order from overwriting it. Use `--resume` to continue. To intentionally start again with new options in the same directory, move the order file aside first, for example:
+### 4. Pull both OpenFOAM images
 
 ```bash
-mv ~/run/cfmesh_layers3/simulation_order.json \
-  ~/run/cfmesh_layers3/simulation_order.previous.$(date +%Y%m%d_%H%M%S_%N).json
-# Then run your normal command with the same --sim-dir.
+docker pull opencfd/openfoam-default:2512
+docker pull microfluidica/openfoam:13
 ```
 
-**Continue (`--resume`):** restores stored mesh-only/layer/quality/core settings, retries failed stages and skips completed cases. Failed mesh attempts restart from current dictionaries; existing case directories are kept with `_PREVIOUS_<timestamp>`. Solver/postprocessing resume retains its case snapshot. Extra options with `--resume` do not replace stored settings. A lock prevents concurrent launchers from using the same order; a stale lock file alone does not block reuse.
+| Runtime | Purpose |
+| --- | --- |
+| `opencfd/openfoam-default:2512` | Native cfMesh utilities and dictionary operations |
+| `microfluidica/openfoam:13` | Mesh assembly, non-conformal coupling (NCC), checks and flow solution |
+| Host `generateBoundaryLayers` | Standalone layer-generation utility |
 
-To switch mesh-only to a full simulation, move the existing order JSON aside as above, then use the same normal command without `--mesh-only` and without `--resume`, adding acoustic/end-time options. This rebuilds the case and preserves the earlier mesh in a sibling folder. You can also use a separate order if you prefer.
+These images are used for different stages. Do not substitute one for the other.
+The pipeline sources the appropriate OpenFOAM environment **inside each container**;
+a host OpenFOAM installation is not required. Docker bind mounts expose the case
+and its `Parameters/` directory to the tools.
 
-For a mesh study (one STL and one RPM in a new order):
+### 5. Install the cfMesh helper
 
 ```bash
-mkdir -p ~/run/cfmesh_study/STL
-cp cfmesh_test/input/fused.stl ~/run/cfmesh_study/STL/10x7E.stl
-python main.py --sim-dir ~/run/cfmesh_study --rpms 4000 --mode AMI \
-  --turbulence kOmegaSST --total-cores 4 --mesh-only --study \
+bash setup_cfmesh.sh
+```
+
+The installer downloads the standalone Linux cfMesh 1.2.0 binaries and checks
+`generateBoundaryLayers`. The default installation is discovered automatically.
+For an existing custom installation:
+
+```bash
+export CFMESH_BIN=/absolute/path/to/generateBoundaryLayers
+```
+
+Use the executable path, not its directory. The current preflight checks this
+helper even when a particular mesh configuration will not add layers.
+
+### 6. Enable report visuals
+
+Install [ParaView](https://www.paraview.org/download/) on the simulation host,
+including its `pvpython` or `pvbatch` executable. It runs in its own Python runtime;
+do not install ParaView into the Conda environment with pip.
+
+```bash
+export PARAVIEW_EXECUTABLE=/absolute/path/to/paraview/bin/pvpython
+"$PARAVIEW_EXECUTABLE" --version
+```
+
+The pipeline otherwise searches `PATH` for `pvpython`, then `pvbatch`. Server
+rendering uses `--force-offscreen-rendering`; the ParaView build and host graphics
+libraries must support offscreen rendering. A desktop GUI session is not required
+with a suitable headless build. Rendering failures are recorded in
+`report/visuals/manifest.json` and the associated `paraview.log`.
+
+ParaView is optional for solving. Without a working renderer, the report records
+missing visuals rather than inventing them. Set `"required": true` in a case's
+`visualization.json` if missing/partial visuals should fail postprocessing.
+
+### 7. Check the installation
+
+```bash
+python -m tools.cfmesh_runtime --smoke-test
+CFMESH_DOCKER_TESTS=1 python -m unittest discover -s tests -v
+```
+
+The smoke test exercises container utilities, dictionary includes and mounted-file
+writes without creating a mesh. The integration tests require the installed
+pipeline environment and Docker. Passing these checks is not a CFD validation;
+inspect a mesh before committing to a production flow run.
+
+## First run
+
+### Supply a propeller
+
+Create a dedicated **order directory** and put one or more STL files in its `STL/`
+subdirectory. One order holds its input geometry, saved settings and generated cases.
+
+```bash
+mkdir -p ~/simulations/propeller_mesh/STL
+cp /path/to/propeller.stl ~/simulations/propeller_mesh/STL/
+```
+
+Provide a closed, watertight propeller surface. The rotation axis is **+y through
+the origin**. Check orientation, origin and dimensions before meshing.
+`Parameters/cfmeshDomainDict` controls STL scaling; its current `scale 1` expects
+coordinates in metres. For geometry in millimetres, set the scale to `0.001`.
+
+If `examples/STL/10x7E.stl` exists, an empty order can use it automatically. Some
+checkouts do not contain this example; supplying your own STL always avoids that
+dependency. Source, template and configuration directories cannot be used as outputs.
+
+### Inspect the mesh
+
+```bash
+python main.py --sim-dir ~/simulations/propeller_mesh \
+  --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
+  --total-cores 4 --mesh-only --live-output
+```
+
+Open the generated case's `sim.foam` in ParaView and inspect the blade surface,
+near-wall cells, rotor/stator interface and mesh-quality logs. `--mesh-only` stops
+after meshing and checks; it does not solve the flow or run acoustics.
+
+### Run aerodynamics
+
+Use a new order so its settings and results stay separate from the mesh inspection:
+
+```bash
+mkdir -p ~/simulations/propeller_flow/STL
+cp ~/simulations/propeller_mesh/STL/*.stl ~/simulations/propeller_flow/STL/
+python main.py --sim-dir ~/simulations/propeller_flow \
+  --rpms 4000 --mode MRF --turbulence kOmegaSST --wall-functions no \
+  --total-cores 4 --aerodynamics-only --end-on rev 20 --live-output
+```
+
+### Run aeroacoustics
+
+```bash
+mkdir -p ~/simulations/propeller_acoustics/STL
+cp ~/simulations/propeller_mesh/STL/*.stl ~/simulations/propeller_acoustics/STL/
+python main.py --sim-dir ~/simulations/propeller_acoustics \
+  --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
+  --total-cores 4 --acoustic-surface impermeable --end-on rev 20 --live-output
+```
+
+The durations above are examples, not convergence guarantees. Allow the flow to
+settle and retain a sufficiently long acoustic recording. The acoustic calculation
+requires five fully arrived rotations, including propagation delay. Insufficient
+recordings produce an `insufficient_duration` status rather than a valid spectrum.
+
+## Model selection
+
+New orders explicitly select `--mode`, `--turbulence` and `--wall-functions`.
+
+| Turbulence selection | AMI, resolved walls | AMI, wall functions | MRF, resolved walls | MRF, wall functions |
+| --- | --- | --- | --- | --- |
+| `kOmegaSST` | Yes | Yes | Yes | Yes |
+| `kEpsilon` | LaunderSharmaKE | Standard kEpsilon | LaunderSharmaKE | Standard kEpsilon |
+| `DES` | Yes | Unsupported | Unsupported | Unsupported |
+
+- **AMI** rotates the rotor mesh and couples it through NCC in the Foundation
+  runtime. Use it for time-resolved rotor flow and aeroacoustics.
+- **MRF** keeps the mesh stationary and applies a rotating reference frame in
+  `rotaryRegion`. It uses the transient PIMPLE solver with a frozen rotor position.
+  It does not reproduce sliding-mesh blade-passing interactions.
+- **`--wall-functions no`** selects viscous-sublayer resolution. Design the mesh
+  for near-wall resolution and inspect y+; selecting this flag does not refine it.
+- **`--wall-functions yes`** selects wall-function boundary conditions. Choose
+  compatible near-wall spacing rather than assuming a finer mesh is always sufficient.
+
+Resolved kEpsilon uses the [Launder-Sharma low-Re formulation](https://doc.cfd.direct/notes/cfd-general-principles/low-re-k-epsilon-models).
+Resolved SST/DES evaluates its viscous omega boundary condition using runtime-compiled
+OpenFOAM code. See [CoreTemplates/README.md](CoreTemplates/README.md) for details.
+
+`--boundary-layers` controls **mesh layer generation**, independently of wall treatment:
+
+| Value | Behavior |
+| --- | --- |
+| `dict` (default) | Follow the rotor and stator mesh dictionaries |
+| `cfmesh` | Enable the complete native rotor workflow, including dictionary-controlled layer subdivision |
+| `none` | Disable layers in both regions |
+
+## Run options
+
+| Task | Options |
+| --- | --- |
+| Several speeds | `--rpms 3000 4000 5000` |
+| Total CPU budget | `--total-cores 8` (`--cores` is an alias) |
+| Initialize each RPM from the previous one | `--field-init on` with ascending RPMs |
+| Independent cases | `--field-init off` (default) |
+| Flow only | `--aerodynamics-only` |
+| Solid blade FW-H surface | `--acoustic-surface impermeable` |
+| Fixed enclosing FW-H sphere | `--acoustic-surface permeable --acoustic-sphere-diameter 2.5` |
+| End after revolutions | `--end-on rev 20` |
+| End at simulation time | `--end-on time 0.3` |
+| Convergence stopping | `--end-on convergence` (default), `force_convergence`, or `residual_convergence` |
+| Full live logs | `--live-output` (omit for the dashboard) |
+
+Sphere diameter is a multiple of propeller diameter. Do not combine acoustic
+surface options with `--aerodynamics-only`. Independent cases run concurrently
+within the total core budget; field initialization sequences cases by geometry.
+
+### Resume an order
+
+```bash
+python main.py --sim-dir ~/simulations/propeller_flow --resume --live-output
+```
+
+Resume restores `simulation_order.json`, skips completed stages and retries failed
+ones. Stored model, wall treatment, acoustic settings and core allocation take
+precedence over replacement options. To change a run configuration, create a new
+order. Recreated case folders are preserved with a `_PREVIOUS_<timestamp>` suffix.
+Older orders without explicit wall treatment use the preserved legacy templates.
+
+### Parameter studies
+
+Studies require one STL and one RPM. Values are separated by `...`:
+
+```bash
+python main.py --sim-dir ~/simulations/mesh_study \
+  --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
+  --total-cores 4 --mesh-only --study \
   --study-file cfmeshCommon --study-parameter propellerCellSize \
   --study-values '0.00125...0.000625' --live-output
 ```
 
-Studies accept existing files in `Parameters`, including `cfmeshCommon`, `cfmeshRefinementDict`, `cfmeshDomainDict`, `cfmeshRotorDict`, `cfmeshStatorDict`, and the usual solver parameter files such as `controlDict`. The `.cpp` suffix is optional. Nested entries use foamDictionary paths such as `boundaryLayers/patchBoundaryLayers/propeller/nLayers`; their generated case-folder names are sanitized.
+Populate this order's `STL/` first. Study files are names from `Parameters/`;
+`.cpp` is optional. Nested keys use paths such as
+`boundaryLayers/patchBoundaryLayers/propeller/nLayers`. Field initialization is
+not supported for studies.
 
-## Inspect in ParaView
+## Case settings
 
-For the first order, after meshing (including a run stopped on quality):
+Edit source settings **before creating a new case**. Each case receives a snapshot;
+subsequent source edits do not change an existing run.
 
-```bash
-cd ~/run/cfmesh_layers3/10x7E_4000RPM_AMI
-touch sim.foam
-paraview sim.foam
+| Location | Controls |
+| --- | --- |
+| `Parameters/cfmeshDomainDict` | STL scale, fluid domain and rotor dimensions |
+| `Parameters/cfmeshCommon.cpp` | Cell sizes and propeller refinement thickness |
+| `Parameters/cfmeshRefinementDict` | Refinement cylinders and spheres |
+| `Parameters/cfmeshRotorDict` | Rotor refinement, layers and workflow |
+| `Parameters/cfmeshStatorDict` | Stator refinement and workflow |
+| `Parameters/controlDict.cpp` | Time stepping, saved-field cadence and retention |
+| `Parameters/rotational_parameters.cpp` | Angular velocity, set from the requested RPM |
+| `CoreTemplates/<mode>/<model>/<treatment>/` | Initial fields, boundary conditions and solver dictionaries |
+| `<case>/visualization.json` | Optional rendering settings |
+
+## Results and reports
+
+```text
+<order>/
+  STL/                         Input geometry
+  simulation_order.json        Stored settings, case status and scheduler state
+  <case>.preprocessing.log      Preparation output
+  <case>/
+    sim.foam                   Open in ParaView
+    Parameters/                Case-specific parameter snapshot
+    constant/ + system/        Mesh, models and solver configuration
+    <time>/                    Saved flow fields and moving-mesh data
+    postProcessing/            Loads, diagnostics and acoustic samples
+    report/
+      simulation_report.pdf
+      acoustic-status.json
+      spl_spectrum.png         When acoustic prediction succeeds
+      visuals/manifest.json    Rendered views, units, ranges and coverage notes
 ```
 
-`paraview` requires an accessible ParaView executable. This machine currently has Windows ParaView, so the direct alternative from WSL is:
+For diagnostics, inspect `log.cfmesh`, `log.checkMesh`, `log.checkMesh.NCC`,
+`log.pimpleFoam`, `cfmesh/mesh-status.json`, and `cfmesh/ncc-status.json`.
+A finished report does not establish convergence or mesh independence: review its
+force history, residuals, Courant numbers and wall-treatment statistics.
 
-```bash
-"/mnt/c/Program Files/ParaView 6.1.0/bin/paraview.exe" --data="$(wslpath -w "$PWD/sim.foam")"
+The report shows hydrodynamic pressure and flow structures separately from the
+FW-H observer spectrum. In incompressible OpenFOAM cases, `p` is usually kinematic
+pressure, with units m^2/s^2; it must not be labelled Pa without a density conversion.
+Pressure RMS, vorticity and Q isosurfaces are not sound-pressure level.
+
+### Configure visuals
+
+For a shorter rendering run, create `<case>/visualization.json` before postprocessing:
+
+```json
+{
+  "image_resolution": [2400, 1600],
+  "surface_phases": 4,
+  "volume_phases": 2,
+  "statistics_revolutions": 5,
+  "wake_stations_D": [-1, -0.5, 0, 0.5, 1],
+  "q_over_omega2": [0.1, 0.5, 1],
+  "report_max_views": 32,
+  "log_fields": ["vorticity_magnitude", "wallShearStress", "dpdt_rms"],
+  "required": false
+}
 ```
 
-Or use Windows ParaView > File > Open and select the case's `sim.foam`. Choose the OpenFOAM reader if prompted, select `internalMesh` and desired boundary patches, then Apply. Use **Surface With Edges** for cells and a **Clip** or **Slice** through the shaft to see internal refinement/layers. Hide the outer box to inspect the propeller. After a solver run select the reconstructed case, refresh the time list, and select `U` or `p`. NCC may appear as separate coincident interface patches in the built-in reader.
+The PDF selects up to `report_max_views` representative figures across quantities;
+all rendered PNGs remain in the archive. Increase the limit to embed more views.
+Magnitude fields listed in `log_fields` use a labelled logarithmic color scale;
+set this list to `[]` for linear scales throughout.
 
-## Logs, results and installed runtimes
+Phase settings select saved snapshots; they do not create new CFD samples.
+Surface statistics still use all samples in their configured window. Set
+`diameter_m` for geometry whose filename does not encode a diameter like `10x7E`.
+The renderer accepts fixed `color_ranges` for cross-case comparisons; the supported
+keys and validation rules are in `tools/visualization.py`.
 
-- `pipeline-native-fault.log` in the order directory: unexpected native faults in the launcher.
-- `<case>.preprocessing.log` in the order directory: preprocessing output and native fault traces.
-- `case/cfmesh/log.interfaceProjection`, `interface-projection.json`: cylindrical correction and its displacement limit.
-- `case/log.cfmesh`: aggregate native meshing log; `case/cfmesh/{rotor,stator}/log.*`: individual native-container commands.
-- `case/log.checkMesh`, `log.checkMesh.NCC`, `log.createNonConformalCouples`, `log.pimpleFoam`: mesh/coupling/flow evidence.
-- `case/cfmesh/geometry.json`, `mesh-status.json`, `ncc-status.json`: dimensions, acceptance and interface overlap.
-- `case/postProcessing/`: forces, residuals and sampled acoustic VTK surfaces.
-- `case/report/spl_spectrum.png` and `simulation_report.pdf`: acoustic spectrum/report after a full run.
+**Retain the source data to regenerate figures.** Keep the case dictionaries,
+`constant/polyMesh`, relevant saved time directories (including moving-mesh files),
+`postProcessing`, logs, and the visual manifest/settings. The PDF and screenshots
+cannot recover deleted fields or acoustic surface recordings. `purgeWrite` in
+`Parameters/controlDict.cpp` controls how many volume writes survive a run.
 
-Native `cartesianMesh`, `improveMeshQuality` and every `foamDictionary` query/edit run in Docker image `opencfd/openfoam-default:2512`. No host OpenFOAM v2512 installation or `CFTEST_FOAM_BASHRC` is needed. Repository and case paths are bind-mounted read/write, including external `--sim-dir` paths and study dictionaries. Linux containers use the invoking user's UID/GID. Host case paths containing spaces receive whitespace-free container aliases for OpenFOAM. Live output and stage logs are retained.
+## Troubleshooting
 
-The standalone `generateBoundaryLayers` executable remains host-side: the existing `CFMESH_BIN` / PATH / `~/.local/cfmesh` resolver is unchanged. Run `bash setup_cfmesh.sh` once if that binary is not already installed; rerunning the script verifies an existing installation. The native rotor workflow still uses its existing built-in cfMesh layer settings. Assembly, NCC, solver and remaining Foundation utilities continue to use `microfluidica/openfoam:13`. Python uses the existing `of_pipeline_env`.
+| Symptom | What to check |
+| --- | --- |
+| Docker unavailable in WSL | Start Docker Desktop and enable integration for the distribution used by this terminal. Check `docker info`. |
+| Docker permission/connection error | Ensure the CLI and Python SDK can access the same daemon as your simulation user. |
+| Required image not found | Pull both tagged images listed in Installation. |
+| Editable acoustic package cannot be installed | Populate submodules and run environment creation from the repository root. |
+| `generateBoundaryLayers` not found | Run `bash setup_cfmesh.sh` or set `CFMESH_BIN` to the executable. |
+| No STL / missing example input | Place your geometry in `<order>/STL/`; do not depend on the optional example. |
+| Existing order rejected | Use `--resume`, or create a separate order for changed settings. |
+| Mesh quality checks fail | Inspect the mesh and logs, then adjust geometry/refinement/layers. `--allow-bad-mesh` is a diagnostic override, not a quality fix. |
+| Acoustic spectrum unavailable | Inspect `acoustic-status.json`; retain a longer settled recording with propagation delay. |
+| Blank or missing visuals | Inspect the visual manifest and `paraview.log`; verify the host's offscreen ParaView build and saved fields. Nearly blank plot areas are rejected. |
+| Visual atlas is partial | Read the coverage notes for missing fields, out-of-domain slices or rendering failures. |
+| Terminal reports a stale working directory | Change to `/`, then back to the repository and retry. |
 
-On the Linux server, from this branch's repository directory:
+## Repository guide and maintenance
+
+| File/folder | Responsibility |
+| --- | --- |
+| `main.py` | CLI entry point and simulation-order dispatch |
+| `preprocessing.py` | Case creation and geometry preparation |
+| `cfmesh.py` | Meshing-stage entry point |
+| `openfoamSimulation.py` | Container execution, meshing, solving and reconstruction |
+| `postprocessing.py` | Acoustic, visualization and report stages |
+| `acoustic_propagation.py` | FW-H observer prediction |
+| `visualization.py` | ParaView visualization entry point |
+| `createSimulationReport.py` | PDF report assembly |
+| `tools/` | Implementation helpers, scheduling and runtime management |
+| `tests/` | Pipeline regressions and optional Docker integration tests |
+| `acousticSolver/` | FoamAcoustics submodule |
+
+Local checks that do not launch a flow simulation:
 
 ```bash
-git switch cfmesh-standalone
-git pull --ff-only
-conda activate of_pipeline_env
-docker pull opencfd/openfoam-default:2512
-docker image inspect microfluidica/openfoam:13 >/dev/null
-bash setup_cfmesh.sh
-python cfmesh_runtime.py --smoke-test
-CFMESH_DOCKER_TESTS=1 python test_cfmesh_runtime.py
-python -c 'from tools import resolve_cfmesh_executable; print(resolve_cfmesh_executable())'
+python -m unittest discover -s tests -v
+PARAVIEW_RENDER_TESTS=1 python -m unittest discover -s tests -p test_visualization.py -v
 ```
 
-If the Foundation image is absent, run `docker pull microfluidica/openfoam:13`. The smoke test runs all three native utilities with `-help`, queries and edits an included dictionary, and verifies host-visible polyMesh writes in temporary repository-local and external cases. It launches no mesh. Pipeline preflight also checks Docker, both images, the three utilities and the host binary. Docker pulls v2512 automatically if absent.
-
-Use an external order directory (the existing original-repository output guard is retained):
-
-```bash
-mkdir -p "$HOME/run/cfmesh_docker2512/STL"
-cp cfmesh_test/input/fused.stl "$HOME/run/cfmesh_docker2512/STL/10x7E.stl"
-python main.py --sim-dir "$HOME/run/cfmesh_docker2512" --rpms 4000 --mode AMI \
-  --turbulence kOmegaSST --total-cores 4 --mesh-only --live-output
-```
-
-Use a fresh order directory for a new run, or `--resume` for an existing order. This is the full propeller mesh and may take time; the smoke test above is the lightweight runtime check.
-
-The optional ParaView report atlas currently reports unavailable because headless `pvpython`/`pvbatch` is not installed on the WSL host; the acoustic spectrum and PDF still generate. Interactive Windows ParaView viewing works independently. Keep optional visualization settings in the existing visualization configuration, or configure a compatible renderer if atlas images are needed.
-
-## Validation and limitations
-
-The current refined propeller test has **2,791,476 cells**, three-cell stacks at all 10,404 propeller faces, and 9,903 stacks whose two growth ratios are within 0.02 of 1.2. It still fails four strict checks (face-tet quality, low determinant, concavity, interpolation weight). With the diagnostic quality override, NCC mean coverage is 0.999993 but local minima are 0.642939 / 0.915357, below the 0.95 local threshold. The actual propeller solver is therefore blocked. This is a meshing/interface limitation, not a successful production simulation. See `rework-20260913/final-propeller-results.json` under the validation directory. The original repository's 16,628 files were rechecked and unchanged.
-
-The 13 September rework is recorded in `cfmesh_test/validation/rework-20260913/`. It checks empty/repeated order directories, preservation of previous results, resume, concurrent-order protection, native region definitions on both sides, and the final three-layer setup. A three-step parallel rotating-flow test with permeable sampling exercises the updated connection to the acoustic predictor. These short tests demonstrate integration, not physical convergence.
-
-Earlier 11 September results below refer to the previous refinement configuration:
-
-The default three-layer propeller run is saved at `cfmesh_test/validation/native-propeller-layers3/10x7E_4000RPM_AMI`. Open its `sim.foam` to inspect it immediately. Native generation and layer refinement completed. Independent opposite-face tracing found three-cell stacks at all 10,404 propeller boundary faces; 9,897 stacks have both spacing ratios within 0.02 of 1.2. The measurements are in `cfmesh_test/validation/propeller-layers3-stacks.json`.
-
-This layered mesh fails four strict checks: 152 low-quality face-tet decompositions, 1,014 concave cells, 27 small interpolation weights, and 72 small adjacent-cell volume ratios. All cell volumes are positive and maximum skewness is 3.73076, but the strict quality gate correctly stops before NCC and solving. These results confirm generated layers, not an accepted solver mesh.
-
-Validation artifacts are under `cfmesh_test/validation/`. The selected propeller completed native meshing and NCC with mean initial coverage 0.999996, but failed six strict pre-NCC quality checks and one basic post-NCC check. Native-layer assembly was also exercised with an explicit quality override.
-
-A small artificial rotating case completed two-core flow through six revolutions, impermeable FW-H prediction, spectrum and PDF generation. Three-step serial kEpsilon and DES cases produced permeable VTK samples, which were also read by the stationary-surface FW-H predictor. Native dictionary studies, uppercase STL input, output isolation and the default strict quality stop were checked. These are integration checks, not aerodynamic/acoustic validation or proof of a production-quality propeller mesh. Quality overrides in these fixtures are intentional and not defaults.
-
-The original standalone experiment remains available through `run_cfmesh_test.sh` and `README_CFMESH_TEST.md`. It is separate from the full pipeline described here. The original README and changed template snapshots are retained in `cfmesh_test/validation/pre-native-pipeline/`.
+Docker integration checks are opt-in as shown in Installation. Tests that read the
+bundled example require `examples/STL/10x7E.stl`. When changing the renderer, also
+render representative cell/point fields, slices and mesh views in the target
+ParaView runtime and inspect the resulting images and PDF.

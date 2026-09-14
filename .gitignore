@@ -8,3 +8,13 @@ STLs/*
 **/.venv/
 __pycache__/
 *.pyc
+
+# Local simulation output and retired build artifacts
+runs/
+cfmesh_tools/
+cfmesh_test/
+*Zone.Identifier
+
+# Local report recovery and rendering checks
+tmp/
+output/

@@ -1,0 +1,79 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2012                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      omega;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 0 -1 0 0 0 0];
+
+internalField   uniform 0.0495;
+
+boundaryField
+{
+    #includeEtc "caseDicts/setConstraintTypes"
+
+    inlet
+    {
+        type            fixedValue;
+        value           $internalField;
+    }
+
+    outlet
+    {
+        type            inletOutlet;
+        inletValue      $internalField;
+        value           $internalField;
+    }
+	
+	walls
+	{
+		type            fixedValue;
+        value           uniform 1000;
+	}
+
+    rotaryRegion
+    {
+    type    zeroGradient;
+    }
+
+    rotaryRegion_slave
+    {
+    type    zeroGradient;
+    }
+
+    propeller
+    {
+        type codedFixedValue;
+        value uniform 1;
+        name resolvedOmega;
+        codeInclude
+        #{
+            #include "fvCFD.H"
+        #};
+        code
+        #{
+            const IOdictionary transport
+            (
+                IOobject("transportProperties", this->db().time().constant(),
+                         this->db(), IOobject::MUST_READ, IOobject::NO_WRITE, false)
+            );
+            const dimensionedScalar nu("nu", dimViscosity, transport);
+            // Resolved-wall asymptote, beta1=0.075; distance is wall-normal.
+            this->operator==(60.0*nu.value()/0.075*sqr(this->patch().deltaCoeffs()));
+        #};
+    }
+}
+
+
+// ************************************************************************* //

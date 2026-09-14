@@ -1,0 +1,10 @@
+FoamFile { version 2.0; format ascii; class dictionary; object MRFProperties; }
+#include "../Parameters/rotational_parameters.cpp"
+rotor
+{
+    cellZone rotaryRegion;
+    active yes;
+    origin (0 0 0);
+    axis (0 1 0);
+    omega $omega_val;
+}

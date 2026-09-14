@@ -36,6 +36,7 @@ def create_simulation_report(
     turbulence_model,
     output_pdf=None,
     quiet=False,
+    aerodynamics_only=False,
 ):
     case_path = Path(case_path)
     report_dir = case_path / "report"
@@ -309,7 +310,7 @@ def create_simulation_report(
     y_ts = h - 110
 
     c.setFont("Helvetica-Bold", 12)
-    
+
     y_ts -= 34
     c.setFont("Helvetica-Bold", 12)
     c.drawString(50, y_ts, "Observed solver time-step statistics")
@@ -493,57 +494,58 @@ def create_simulation_report(
         / "spl_spectrum.png"
     )
 
-    # A Path object is never None, so check whether the PNG really exists.
-    # The page is still created when the file is missing or unreadable so the
-    # report clearly shows why the acoustic figure was not embedded.
-    c.showPage()
+    if not aerodynamics_only:
+        # A Path object is never None, so check whether the PNG really exists.
+        # The page is still created when the file is missing or unreadable so the
+        # report clearly shows why the acoustic figure was not embedded.
+        c.showPage()
 
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, h - 50, "Acoustic Evaluation")
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, h - 50, "Acoustic Evaluation")
 
-    c.setFont("Helvetica", 10)
-    c.drawString(
-        50,
-        h - 75,
-        "Predicted sound-pressure-level spectrum at the defined observer position.",
-    )
+        c.setFont("Helvetica", 10)
+        c.drawString(
+            50,
+            h - 75,
+            "Predicted sound-pressure-level spectrum at the defined observer position.",
+        )
 
-    if acoustic_plot.is_file():
-        try:
-            acoustic_image = ImageReader(str(acoustic_plot))
-            c.drawImage(
-                acoustic_image,
-                40,
-                h - 520,
-                width=510,
-                height=400,
-                preserveAspectRatio=True,
-                anchor="c",
-                mask="auto",
-            )
-            if not quiet:
-                print(f"Acoustic plot added to report: {acoustic_plot}")
-        except Exception as exc:
-            warning = f"Acoustic plot could not be read: {exc}"
+        if acoustic_plot.is_file():
+            try:
+                acoustic_image = ImageReader(str(acoustic_plot))
+                c.drawImage(
+                    acoustic_image,
+                    40,
+                    h - 520,
+                    width=510,
+                    height=400,
+                    preserveAspectRatio=True,
+                    anchor="c",
+                    mask="auto",
+                )
+                if not quiet:
+                    print(f"Acoustic plot added to report: {acoustic_plot}")
+            except Exception as exc:
+                warning = f"Acoustic plot could not be read: {exc}"
+                if not quiet:
+                    print(warning)
+                c.setFont("Helvetica", 10)
+                c.drawString(50, h - 110, warning[:95])
+                c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
+        else:
+            warning = f"Acoustic plot not found: {acoustic_plot}"
             if not quiet:
                 print(warning)
             c.setFont("Helvetica", 10)
-            c.drawString(50, h - 110, warning[:95])
-            c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
-    else:
-        warning = f"Acoustic plot not found: {acoustic_plot}"
-        if not quiet:
-            print(warning)
-        c.setFont("Helvetica", 10)
-        status_path = report_dir / "acoustic-status.json"
-        if status_path.is_file():
-            acoustic_status = json.loads(status_path.read_text())
-            detail = acoustic_status.get("detail", "Acoustic spectrum is unavailable.")
-            for index, line in enumerate(textwrap.wrap(detail, width=88)):
-                c.drawString(50, h - 110 - 15 * index, line)
-        else:
-            c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
-            c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
+            status_path = report_dir / "acoustic-status.json"
+            if status_path.is_file():
+                acoustic_status = json.loads(status_path.read_text())
+                detail = acoustic_status.get("detail", "Acoustic spectrum is unavailable.")
+                for index, line in enumerate(textwrap.wrap(detail, width=88)):
+                    c.drawString(50, h - 110 - 15 * index, line)
+            else:
+                c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
+                c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
 
     visualization_summary = append_visualization_report(c, case_path)
     c.save()
