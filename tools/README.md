@@ -15,7 +15,8 @@ Top-level stage files show the workflow. Put supporting functions here.
 | `cfmesh_orders.py` | Order locking and example input selection |
 | `cfmesh_refinement.py` | Refinement shapes |
 | `cfmesh_interface.py` | Cylindrical interface projection in an isolated process |
-| `cfmesh_layers.py` | Existing standalone boundary-layer adapter |
+| `cfmesh_controls.py` | Editable mesh improvement and acceptance controls |
+| `cfmesh_parameters.py` | Sphere-relative domain bounds and level-based cell sizes |
 | `geometry.py` | STL reader and validation |
 | `reporting.py` | Result summaries and report plots |
 | `visualization.py` | ParaView configuration, rendering and atlas helpers |

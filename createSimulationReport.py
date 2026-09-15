@@ -37,10 +37,26 @@ def create_simulation_report(
     output_pdf=None,
     quiet=False,
     aerodynamics_only=False,
+    mesh_only=False,
 ):
     case_path = Path(case_path)
     report_dir = case_path / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
+
+    if mesh_only:
+        output_pdf = Path(output_pdf) if output_pdf else report_dir / "simulation_report.pdf"
+        c = canvas.Canvas(str(output_pdf), pagesize=A4)
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(50, A4[1] - 60, "Mesh Report")
+        c.setFont("Helvetica", 11)
+        c.drawString(50, A4[1] - 90, f"Case: {case_path.name}")
+        c.drawString(50, A4[1] - 112, "Mesh-only run: meshing views at the initial mesh time.")
+        visualization_summary = append_visualization_report(c, case_path)
+        c.save()
+        if not quiet:
+            print(f"Report created: {output_pdf}")
+        return {"case_path": str(case_path), "output_pdf": str(output_pdf),
+                "visualization": visualization_summary}
 
     force_file = case_path / "postProcessing" / "forcesBlades" / "merged_forces.dat"
     residual_file = case_path / "postProcessing" / "residuals" / "merged_residuals.dat"

@@ -6,11 +6,62 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import tools.visualization as visualization
 
 
 class VisualizationTests(unittest.TestCase):
+    def test_mesh_views_accept_zero_time_without_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'constant' / 'polyMesh').mkdir(parents=True)
+            settings = visualization.visualization_settings(
+                tmp, 4000, None, {'mesh_only': True, 'diameter_m': 0.25})
+            reader = MagicMock()
+            reader.CellArrays.Available = []
+            reader.TimestepValues = [0.0]
+            reader.GetDataInformation.return_value.GetBounds.return_value = [-1, 1] * 3
+            pvs = MagicMock()
+            pvs.OpenFOAMReader.return_value = reader
+            type(pvs.Slice.return_value).SliceType = PropertyMock(return_value=MagicMock())
+            result = {'views': [], 'warnings': []}
+            with patch.object(visualization, 'pvs', pvs, create=True), \
+                    patch.object(visualization, '_pvvis_crop', return_value=MagicMock()), \
+                    patch.object(visualization, '_pvvis_render') as render, \
+                    patch.object(visualization, '_pvvis_wall') as wall:
+                visualization._pvvis_volume(result, settings, Path(tmp), MagicMock(), ('Pa', 'Pressure'))
+            self.assertEqual(reader.SkipZeroTime, 0)
+            self.assertEqual(reader.CellArrays, [])
+            self.assertTrue(render.called)
+            self.assertTrue(all(call.args[5].startswith('Mesh section') for call in render.call_args_list))
+            self.assertEqual(wall.call_args.args[1], 0.0)
+            self.assertEqual(result['warnings'], [])
+
+    def test_mesh_only_report_without_solver_outputs(self):
+        from createSimulationReport import create_simulation_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            visuals = root / 'report' / 'visuals'
+            visuals.mkdir(parents=True)
+            (visuals / 'manifest.json').write_text(json.dumps({
+                'status': 'disabled', 'views': [], 'warnings': [],
+                'settings': {'mesh_only': True},
+            }))
+            create_simulation_report(root, 4000, 'AMI', 'kOmegaSST', mesh_only=True, quiet=True)
+            self.assertTrue((root / 'report' / 'simulation_report.pdf').read_bytes().startswith(b'%PDF'))
+
+    def test_mesh_only_postprocessing_skips_solver_data(self):
+        import postprocessing as module
+
+        with patch.object(module, 'run_visualization') as render, \
+                patch.object(module, 'create_simulation_report') as report, \
+                patch.object(module, 'merge_postprocessing_dat_files') as merge:
+            module.postprocessing(None, 'case', 4000, 'AMI', 'kOmegaSST', MESH_ONLY=True)
+        self.assertEqual(render.call_args.kwargs['config'], {'mesh_only': True})
+        self.assertTrue(report.call_args.kwargs['mesh_only'])
+        merge.assert_not_called()
+
     def test_flow_only_settings_and_log_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = visualization.visualization_settings(tmp, 4000, None)

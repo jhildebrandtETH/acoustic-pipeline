@@ -1030,7 +1030,6 @@ def create_simulation_order(args, simulations_directory: Path):
         "end_on": args.end_on,
         "end_on_value": getattr(args, "end_on_value", None),
         "allow_bad_mesh": args.allow_bad_mesh,
-        "boundary_layers": args.boundary_layers,
         "study": args.study,
         "study_file": getattr(args, "study_file", None),
         "study_parameter": getattr(args, "study_parameter", None),

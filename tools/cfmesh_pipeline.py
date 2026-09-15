@@ -87,8 +87,6 @@ def parameter_file(parameters, name, *, read_only=False):
 def preflight(args):
     safe_path(args.sim_dir)
     native_preflight()
-    from tools import resolve_cfmesh_executable
-    resolve_cfmesh_executable()
     # Load native acoustic libraries before long-running worker threads start.
     if not args.mesh_only:
         import matplotlib
@@ -114,6 +112,12 @@ def preflight(args):
         "cfmeshRefinementDict",
     ):
         query(ROOT / "Parameters" / name)
+    from tools.cfmesh_controls import read_controls
+
+    read_controls(ROOT / "Parameters")
+    from tools.cfmesh_parameters import resolution_settings
+
+    resolution_settings(ROOT / "Parameters")
 
 
 def write(path, text):
@@ -181,12 +185,6 @@ def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=No
         )
     domain_dictionary = parameters_directory / "cfmeshDomainDict"
     scale = float(query(domain_dictionary, "scale"))
-    box_minimum = np.array(
-        list(map(float, query(domain_dictionary, "boxMin").strip("()").split()))
-    )
-    box_maximum = np.array(
-        list(map(float, query(domain_dictionary, "boxMax").strip("()").split()))
-    )
     factor = float(query(domain_dictionary, "rotorRadiusFactor"))
     rotor_half_length = float(query(domain_dictionary, "rotorHalfLength"))
     segments = int(query(domain_dictionary, "cylinderSegments"))
@@ -197,18 +195,26 @@ def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=No
         raise ValueError(
             "Invalid cfmeshDomainDict scale, cylinder dimensions, or segment count"
         )
-    if (
-        box_minimum.shape != (3,)
-        or box_maximum.shape != (3,)
-        or not np.all(box_maximum > box_minimum)
-    ):
-        raise ValueError("Invalid domain bounds")
     vertices, triangles, signed_volume, source_hash = read_stl(Path(source), scale)
     vertices, triangles = np.asarray(vertices), np.asarray(triangles)
     diameter = float(np.ptp(vertices, axis=0).max())
     rotor_radius = factor * diameter
     if not 0.02 < diameter < 2:
         raise ValueError("Check STL units: measured propeller span must be 0.02–2 m")
+    from tools.cfmesh_parameters import (
+        domain_bounds, effective_sphere_radius, resolution_settings,
+    )
+
+    sizing_radius = effective_sphere_radius(
+        parameters_directory, diameter, acoustic_surface, acoustic_diameter,
+    )
+    lower, upper, domain_settings = domain_bounds(parameters_directory, sizing_radius)
+    box_minimum, box_maximum = np.array(lower), np.array(upper)
+    resolution = resolution_settings(parameters_directory)
+    write(parameters_directory / "cfmeshDomain.generated",
+          "// Resolved per-case bounds; edit cfmeshDomainDict inputs, not this file.\n"
+          + "boxMin (" + " ".join(format(v, ".17g") for v in lower) + ");\n"
+          + "boxMax (" + " ".join(format(v, ".17g") for v in upper) + ");\n")
     # Ensure the whole swept propeller fits inside the polygonal cylinder.
     if np.hypot(vertices[:, 0], vertices[:, 2]).max() >= rotor_radius * math.cos(
         math.pi / segments
@@ -291,6 +297,9 @@ def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=No
         segments,
         acoustic_surface,
         acoustic_diameter,
+        bounds=(box_minimum, box_maximum),
+        resolution=resolution,
+        sphere_radius=sizing_radius,
     )
     for role, patches in (("rotor", rotor), ("stator", stator)):
         region_directory = case / "cfmesh" / role
@@ -342,7 +351,7 @@ interpolationSchemes { default linear; } snGradSchemes { default corrected; }
     )
     sphere_radius = None
     if acoustic_surface == "permeable":
-        sphere_radius = 0.5 * float(acoustic_diameter) * diameter
+        sphere_radius = sizing_radius
         if sphere_radius <= np.linalg.norm(vertices, axis=1).max():
             raise ValueError("Acoustic sphere must enclose the complete propeller")
         if np.any(box_minimum >= -sphere_radius) or np.any(
@@ -371,6 +380,8 @@ interpolationSchemes { default linear; } snGradSchemes { default corrected; }
         origin=[0, 0, 0],
         box_min=box_minimum.tolist(),
         box_max=box_maximum.tolist(),
+        domain_settings=domain_settings,
+        resolution=resolution,
         expected_fluid_volume_m3=float(np.prod(box_maximum - box_minimum))
         - abs(signed_volume),
         expected_rotor_volume_m3=float(rotor_cylinder.volume) - abs(signed_volume),
@@ -450,45 +461,22 @@ def patch_info(case):
     return patches
 
 
-def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=False):
+def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
     case = safe_path(case)
+    from tools.cfmesh_controls import read_controls, improvement_command
+
+    controls = read_controls(case / "Parameters")
+    acceptance = controls["acceptance"]
+    write(case / "cfmesh/pipeline-controls.json", json.dumps(
+        dict(controls=controls, allow_bad_mesh=allow_bad),
+        indent=2,
+    ) + "\n")
     for role in ("rotor", "stator"):
         region_directory = case / "cfmesh" / role
         mesh_dictionary = region_directory / "system/meshDict"
         # Expand the user's complete dictionary, preserving native cfMesh controls.
         effective = query(mesh_dictionary)
         write(region_directory / "system/meshDict", effective + "\n")
-        if layers == "none" or (layers == "cfmesh" and role == "stator"):
-            native_run(
-                [
-                    "foamDictionary",
-                    mesh_dictionary,
-                    "-entry",
-                    "workflowControls",
-                    "-set",
-                    "{ stopAfter edgeExtraction; }",
-                ],
-                cwd=case,
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
-        elif (
-            layers == "cfmesh"
-            and role == "rotor"
-            and optional(mesh_dictionary, "workflowControls") is not None
-        ):
-            native_run(
-                [
-                    "foamDictionary",
-                    mesh_dictionary,
-                    "-entry",
-                    "workflowControls",
-                    "-remove",
-                ],
-                cwd=case,
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
         stop = optional(mesh_dictionary, "workflowControls/stopAfter")
         if stop not in (None, "edgeExtraction"):
             raise ValueError(
@@ -499,22 +487,9 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
             log_text = (region_directory / "log.cartesianMesh").read_text()
             if "Stopping after step edgeExtraction" not in log_text:
                 raise RuntimeError("Mesher did not honour the required no-layer stop")
-            native_mesh_run(
-                case,
-                role,
-                [
-                    "improveMeshQuality",
-                    "-nLoops",
-                    "2",
-                    "-nIterations",
-                    "20",
-                    "-nSurfaceIterations",
-                    "0",
-                ],
-                cores,
-                callback,
-                live,
-            )
+            command = improvement_command(controls)
+            if command:
+                native_mesh_run(case, role, command, cores, callback, live)
         docker_run(
             container,
             case,
@@ -580,8 +555,9 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
 
     from tools import report_case_stage
 
-    report_case_stage(callback, "interface", "projecting the shared rotating cylinder")
-    project_rotating_interface(case)
+    if controls["interfaceProjection"]["enabled"]:
+        report_case_stage(callback, "interface", "projecting the shared rotating cylinder")
+        project_rotating_interface(case)
     docker_run(
         container,
         case,
@@ -600,10 +576,12 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
     ]
     if (
         not measured
-        or abs(float(measured[1]) - expected_volume) / expected_volume > 0.005
+        or abs(float(measured[1]) - expected_volume) / expected_volume
+        > acceptance["maxRelativeVolumeError"]
     ):
         raise ValueError(
-            "Assembled fluid volume differs from the intended domain by more than 0.5%"
+            "Assembled fluid volume is missing or exceeds maxRelativeVolumeError "
+            f"({acceptance['maxRelativeVolumeError']:g}); inspect log.checkMesh"
         )
     quality_ok = "Mesh OK." in log_text and not re.search(
         r"Failed\s+\d+\s+mesh checks", log_text
@@ -641,7 +619,8 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
         coupling_log,
     )
     coverage_ok = len(coverage) == 2 and all(
-        float(minimum_coverage) >= 0.95 and float(average_coverage) >= 0.999
+        float(minimum_coverage) >= acceptance["minimumFaceCoverage"]
+        and float(average_coverage) >= acceptance["minimumAverageCoverage"]
         for minimum_coverage, average_coverage, maximum_coverage in coverage
     )
     write(
@@ -650,8 +629,8 @@ def run_mesh(container, case, cores, layers, allow_bad, callback=None, live=Fals
             dict(
                 coverage=coverage,
                 coverage_ok=coverage_ok,
-                minimum_face_coverage=0.95,
-                minimum_average_coverage=0.999,
+                minimum_face_coverage=acceptance["minimumFaceCoverage"],
+                minimum_average_coverage=acceptance["minimumAverageCoverage"],
             ),
             indent=2,
         )

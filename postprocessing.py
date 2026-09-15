@@ -13,6 +13,7 @@ def postprocessing(
     TURBULENCE_MODEL,
     STATUS_CALLBACK=None,
     AERODYNAMICS_ONLY=False,
+    MESH_ONLY=False,
 ):
     emit_status(
         STATUS_CALLBACK,
@@ -20,6 +21,20 @@ def postprocessing(
         detail="starting postprocessing",
         progress=0.0,
     )
+
+    if MESH_ONLY:
+        run_visualization(
+            None, SIMULATION_WORKING_DIRECTORY, RPM_COUNT,
+            STATUS_CALLBACK=STATUS_CALLBACK, config={"mesh_only": True},
+        )
+        emit_status(STATUS_CALLBACK, stage="report", detail="creating mesh report", progress=75.0)
+        with MATPLOTLIB_LOCK:
+            create_simulation_report(
+                case_path=SIMULATION_WORKING_DIRECTORY, turbulence_model=TURBULENCE_MODEL,
+                rpm=RPM_COUNT, mode=MODE, quiet=True, mesh_only=True,
+            )
+        emit_status(STATUS_CALLBACK, stage="postprocessing", detail="postprocessing complete", progress=100.0)
+        return None
 
     if AERODYNAMICS_ONLY:
         from pathlib import Path

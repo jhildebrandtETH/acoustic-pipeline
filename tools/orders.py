@@ -105,7 +105,6 @@ def prepare_simulation_order(args, parser):
         args.cores_per_case = int(order["cores_per_case"])
         args.mesh_only = order["mesh_only"]
         args.allow_bad_mesh = order["allow_bad_mesh"]
-        args.boundary_layers = order.get("boundary_layers", "none")
         args.turbulence = order["turbulence"]
         args.wall_functions = order.get("wall_functions", "legacy")
         args.aerodynamics_only = order.get("aerodynamics_only", False)

@@ -27,6 +27,7 @@ def visualization_settings(case_path, rpm, acoustic_surface, overrides=None):
         "color_ranges": {},
         "log_fields": ["vorticity_magnitude", "wallShearStress", "dpdt_rms"],
         "report_max_views": 32,
+        "mesh_only": False,
     }
     settings_file = Path(case_path) / "visualization.json"
     supplied = json.loads(settings_file.read_text(encoding="utf-8")) if settings_file.is_file() else {}
@@ -35,7 +36,7 @@ def visualization_settings(case_path, rpm, acoustic_surface, overrides=None):
     if unknown:
         raise ValueError(f"Unknown visualization settings: {sorted(unknown)}")
     settings.update(supplied)
-    for key in ("enabled", "required"):
+    for key in ("enabled", "required", "mesh_only"):
         if not isinstance(settings[key], bool):
             raise ValueError(f"{key} must be a boolean")
     for key in ("surface_phases", "volume_phases", "threads", "report_max_views"):
@@ -274,13 +275,20 @@ def append_visualization_report(c, case_path):
 
     new_page("Scientific Visual Atlas - Coverage and Interpretation")
     y = paragraph(f"Status: {manifest['status']} | Generated views: {len(manifest['views'])} | Report selection: up to {manifest.get('settings', {}).get('report_max_views', 32)} representative views", h - 63, 11)
-    for note in [
+    notes = [
         "These figures show saved CFD fields and acoustic-surface diagnostics. Hydrodynamic pressure, its fluctuations and vortex structures are not radiated sound or SPL. Use the FW-H observer spectrum for the acoustic prediction. Steady loading on rotating panels can still radiate tonal noise; low rotating-frame RMS does not imply low sound.",
         "Rotation axis: +y through the origin; lengths in metres. Rotor phase is omega*t modulo 360 degrees, relative to solver t=0. Signed y/D stations are shown on both sides of the rotor; identify the downstream side using axial velocity.",
         "Surface statistics use time-weighted samples over the recorded window. Blade statistics follow verified rotating panels; permeable-surface statistics use verified stationary panels. They are window statistics, not a claim of statistical convergence. No volume averaging across a moving mesh is performed.",
         "Slice color ranges cover the displayed region and are fixed across the selected phases at each station. Different stations may use different ranges; compare their legends. Full displayed-region extrema remain in metadata. Labelled logarithmic magnitude scales clamp zero to the lowest displayed color without changing the underlying data. Cross-case comparison requires matching color_ranges in visualization.json. Derivative maps are limited by saved sample cadence.",
         "The PDF contains a representative selection; all generated views remain in the image archive. The manifest, rendering script, settings, extracted surface statistics and original-resolution PNGs are retained under report/visuals. No CFD fields or postprocessing data are deleted. A visualization recipe alone cannot recreate views after source data are removed.",
-    ]:
+    ]
+    if manifest.get("settings", {}).get("mesh_only"):
+        notes = [
+            "Mesh-only run. Views show the initial volume mesh, blade surface, blade sections and layer close-ups.",
+            "Rotation axis: +y through the origin; lengths in metres. Inspect refinement transitions and layer continuity alongside checkMesh results.",
+            "All generated images, rendering settings and diagnostics are retained under report/visuals.",
+        ]
+    for note in notes:
         y = paragraph(note, y)
     for warning in manifest.get("warnings", []):
         # Paginate long warning lists rather than clipping missing-view evidence.
@@ -880,12 +888,12 @@ def _pvvis_blade_detail(base, wall, t, result, settings, run_dir, view, units):
                            "Blade position comes from the saved mesh. Velocity is relative to rigid rotation about +y. "
                            "Inspect near-wall gradients and the trailing-edge shear layer; resolved detail depends on the mesh and saved fields.")
                 for name, label in (("relative_speed", "Blade-relative speed [m/s]"),
-                                    ("vorticity_magnitude", "Vorticity magnitude [1/s]")):
+                                    ("vorticity_magnitude", "Vorticity magnitude [1/s]")) if not settings.get("mesh_only") else ():
                     _pvvis_attempt(result, run_dir, f"Blade section {name} {station}", lambda: _pvvis_render(
                         cropped, result, settings, run_dir, view, f"Blade flow section - {name.replace('_', ' ')} ({station})",
                         caption + " Local color scale.", camera=radial.tolist(), field=("CELLS", name, label),
                         time_s=t, overlays=[outline]))
-                if cropped.CellData.GetArray("relative_velocity") is not None:
+                if not settings.get("mesh_only") and cropped.CellData.GetArray("relative_velocity") is not None:
                     normal_vector = "(" + "+".join(f"{v:.16g}*{axis}Hat" for v, axis in zip(radial, "ijk")) + ")"
                     projected = _pvvis_calc(cropped, "section_velocity",
                                             f"relative_velocity-dot(relative_velocity,{normal_vector})*{normal_vector}")
@@ -945,16 +953,21 @@ def _pvvis_volume(result, settings, run_dir, view, units):
     reader = pvs.OpenFOAMReader(FileName=str(marker))
     reader.CaseType = "Reconstructed Case"
     reader.MeshRegions = ["internalMesh"]
-    reader.SkipZeroTime = 1
+    mesh_only = settings.get("mesh_only", False)
+    reader.SkipZeroTime = 0 if mesh_only else 1
     reader.Createcelltopointfiltereddata = 0
     reader.UpdatePipelineInformation()
     available = list(reader.CellArrays.Available)
     wanted = [name for name in ("p", "U", "k", "Q", "vorticity", "Co") if name in available]
     missing = [name for name in ("p", "U", "k", "Co") if name not in available]
-    if missing:
+    if mesh_only:
+        wanted = []
+    if missing and not mesh_only:
         result["warnings"].append(f"Volume fields unavailable (corresponding views omitted): {', '.join(missing)}")
     reader.CellArrays = wanted
-    times = [(float(t), None) for t in reader.TimestepValues if float(t) > 0]
+    times = [(float(t), None) for t in reader.TimestepValues if mesh_only or float(t) > 0]
+    if mesh_only:
+        times = [min(times)] if times else [(0.0, None)]
     if not times:
         pvs.Delete(reader)
         raise ValueError("No saved nonzero volume times available")
@@ -964,7 +977,7 @@ def _pvvis_volume(result, settings, run_dir, view, units):
     if diameter is None:
         pvs.Delete(reader)
         raise ValueError("Cannot determine propeller diameter; set diameter_m in visualization.json")
-    if len(selected) < settings["volume_phases"]:
+    if not mesh_only and len(selected) < settings["volume_phases"]:
         result["warnings"].append(f"Only {len(selected)} distinct volume snapshots available for {settings['volume_phases']} requested phases")
     proxies = []
     base = reader
@@ -1018,7 +1031,7 @@ return velocity(data)
         fields += [("k", "Turbulent kinetic energy k [m^2/s^2]", False)]
     if "Co" in wanted:
         fields += [("Co", "Cell Courant number [-]", False)]
-    if not fields:
+    if not fields and not mesh_only:
         raise ValueError("No supported volume fields found")
     ranges_by_station = {}
     # Broad wake context plus rotor close-ups; all legends use these actual crops.
@@ -1136,17 +1149,22 @@ return velocity(data)
 def _pvvis_wall(marker, t, result, settings, run_dir, view, units, base=None):
     wall = pvs.OpenFOAMReader(FileName=str(marker))
     try:
+        mesh_only = settings.get("mesh_only", False)
+        wall.CaseType = "Reconstructed Case"
+        wall.SkipZeroTime = 0 if mesh_only else 1
         wall.UpdatePipelineInformation()
         regions = [name for name in wall.MeshRegions.Available if name == "propeller" or name.endswith("/propeller")]
         if not regions:
             raise ValueError("propeller patch unavailable in OpenFOAM reader")
         wall.MeshRegions = regions
         wall.Createcelltopointfiltereddata = 0
-        wall.CellArrays = [name for name in ("p", "yPlus", "wallShearStress") if name in wall.CellArrays.Available]
+        wall.CellArrays = [] if mesh_only else [name for name in ("p", "yPlus", "wallShearStress") if name in wall.CellArrays.Available]
         wall.UpdatePipeline(t)
         view.ViewTime = t
         wall_fields = [("p", f"{units[1]} [{units[0]}]"), ("yPlus", "Wall y+ [-]")]
-        if "wallShearStress" in wall.CellArrays.Available:
+        if mesh_only:
+            wall_fields = []
+        elif "wallShearStress" in wall.CellArrays.Available:
             shear_unit = _pvvis_pressure_units(Path(settings["case_path"]), "wallShearStress")[0]
             wall_fields.append(("wallShearStress", f"Wall shear magnitude [{shear_unit}]"))
         else:
@@ -1196,9 +1214,9 @@ def _pvvis_main(settings_path):
         setattr(view.AxesGrid, axis + "AxisPrecision", 3)
     units = _pvvis_pressure_units(Path(settings["case_path"]))
     result["pressure_units"] = {"unit": units[0], "label": units[1]}
-    if units[0] in {"units unverified", "unknown dimensions"}:
+    if not settings.get("mesh_only") and units[0] in {"units unverified", "unknown dimensions"}:
         result["warnings"].append("Pressure dimensions could not be verified; pressure figures explicitly retain unverified units")
-    if settings["acoustic_surface"] is not None:
+    if not settings.get("mesh_only") and settings["acoustic_surface"] is not None:
         _pvvis_attempt(result, run_dir, "Acoustic-surface atlas", lambda: _pvvis_surface(result, settings, run_dir, view, units))
     _pvvis_attempt(result, run_dir, "Volume atlas", lambda: _pvvis_volume(result, settings, run_dir, view, units))
     result["resolved_diameter_m"] = settings["diameter_m"]

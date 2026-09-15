@@ -1,10 +1,11 @@
 FoamFile { version 2.0; format ascii; class dictionary; object meshDict; }
-#include "cfmeshCommon.cpp"
+#include "cfmeshSizes.cpp"
+#include "cfmeshGlobalDict"
 surfaceFile "constant/triSurface/domain.ftr";
 maxCellSize $backgroundCellSize;
 localRefinement
 {
-    "rotaryRegion_slave_.*" { cellSize $interfaceCellSize; }
+    "rotaryRegion_slave_.*" { additionalRefinementLevels $interfaceLevel; }
 }
 // Stationary region stays layer-free, including when rotor layers are enabled.
 workflowControls { stopAfter edgeExtraction; }

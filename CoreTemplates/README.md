@@ -13,7 +13,8 @@ in both rotation modes, plus wall-resolved DES in AMI only.
 - Resolved SST/DES: zero wall k/nut; coded viscous omega condition using case viscosity and wall-normal cell distance.
 - Resolved k-epsilon: LaunderSharmaKE low-Re formulation, zero wall k/modified epsilon/nut.
 
-Mesh layer generation is controlled separately by `--boundary-layers`.
+Mesh layer generation is controlled by `Parameters/cfmeshRotorDict` and
+`Parameters/cfmeshStatorDict`, independently of the wall-treatment selection.
 The mesh must resolve the viscous sublayer for the resolved templates; inspect y+.
 Legacy templates are retained unchanged under `legacy/` for resuming older orders.
 Do not use legacy templates to start new orders.

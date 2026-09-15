@@ -15,6 +15,10 @@ def prepare_refinements(
     segments,
     acoustic_surface,
     acoustic_diameter,
+    *,
+    bounds=None,
+    resolution=None,
+    sphere_radius=None,
 ):
     parameters_directory = Path(case) / "Parameters"
     refinement_dictionary = parameters_directory / "cfmeshRefinementDict"
@@ -23,7 +27,6 @@ def prepare_refinements(
         write(generated_dictionary, "// Region refinements disabled.\n")
         return {}
     dimension_names = (
-        "sphereDiameterFactor",
         "wakeOffsetFactor",
         "innerRadiusFactor",
         "innerHeightFactor",
@@ -34,8 +37,6 @@ def prepare_refinements(
         entry_name: float(query(refinement_dictionary, entry_name))
         for entry_name in dimension_names
     }
-    if acoustic_surface == "permeable":
-        controls["sphereDiameterFactor"] = float(acoustic_diameter)
     if not all(math.isfinite(entry_value) for entry_value in controls.values()):
         raise ValueError("Refinement dimensions must be finite")
     if any(
@@ -44,11 +45,21 @@ def prepare_refinements(
         if entry_name != "wakeOffsetFactor"
     ):
         raise ValueError("Refinement dimension factors must be positive")
-    sphere_radius = 0.5 * controls["sphereDiameterFactor"] * diameter
+    from tools.cfmesh_parameters import (
+        domain_bounds, effective_sphere_radius, resolution_settings,
+    )
+
+    if sphere_radius is None:
+        sphere_radius = effective_sphere_radius(
+            parameters_directory, diameter, acoustic_surface, acoustic_diameter,
+        )
+    if bounds is None:
+        lower, upper, _ = domain_bounds(parameters_directory, sphere_radius)
+        bounds = (lower, upper)
+    if resolution is None:
+        resolution = resolution_settings(parameters_directory)
     wake_offset = controls["wakeOffsetFactor"] * sphere_radius
-    domain_dictionary = parameters_directory / "cfmeshDomainDict"
-    box_minimum = np.fromstring(query(domain_dictionary, "boxMin").strip("()"), sep=" ")
-    box_maximum = np.fromstring(query(domain_dictionary, "boxMax").strip("()"), sep=" ")
+    box_minimum, box_maximum = map(np.asarray, bounds)
     if np.any(box_minimum >= -sphere_radius) or np.any(box_maximum <= sphere_radius):
         raise ValueError(
             "Refinement sphere must fit inside the domain; adjust sphereDiameterFactor or box bounds"
@@ -85,9 +96,7 @@ def prepare_refinements(
             ]
         ):
             raise ValueError(f"{region_name} refinement must fit inside the domain")
-        cell_size = float(
-            query(parameters_directory / "cfmeshCommon.cpp", region_name + "CellSize")
-        )
+        cell_size = resolution["cell_sizes_m"][region_name]
         regions[region_name] = dict(
             type="cone",
             p0=[0.0, cylinder_center_y - cylinder_half_length, 0.0],
@@ -100,10 +109,12 @@ def prepare_refinements(
         type="sphere",
         centre=[0.0, 0.0, 0.0],
         radius=sphere_radius,
-        cellSize=float(
-            query(parameters_directory / "cfmeshCommon.cpp", "acousticSphereCellSize")
-        ),
+        cellSize=resolution["cell_sizes_m"]["acousticSphere"],
     )
+    if resolution["mode"] == "levels":
+        for name, entries in regions.items():
+            level_name = "acousticSphere" if name == "acousticSurface" else name
+            entries["additionalRefinementLevels"] = resolution["levels"][level_name]
     if any(
         not math.isfinite(entry_value["cellSize"]) or entry_value["cellSize"] <= 0
         for entry_value in regions.values()
@@ -131,6 +142,10 @@ def prepare_refinements(
             + "".join(
                 f"    {entry_name} {value(entry_value)};\n"
                 for entry_name, entry_value in entries.items()
+                # cellSize wins over additionalRefinementLevels in cfMesh and
+                # its inclusive conversion adds a level for exact powers of two.
+                # Retain the nominal size in geometry.json, not the native input.
+                if entry_name != "cellSize" or "additionalRefinementLevels" not in entries
             )
             + "}\n"
         )

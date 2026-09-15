@@ -1,12 +1,30 @@
-// Shared physical sizes. These are cfMesh controls, not snappy refinement levels.
-backgroundCellSize 0.02; // 0.02
-propellerCellSize 0.000625;
-propellerRefinementThickness 0.002; // matches both original level-5 distance bands
-interfaceCellSize 0.0125;
+// User inputs: nominal cell size = baseCellSize / 2^level.
+// Levels pass directly to cfMesh as additionalRefinementLevels.
+// Nonnegative integer levels; level 0 is the background resolution.
+// Derived native cell sizes are in cfmeshSizes.cpp; edit inputs here for studies.
+baseCellSize 0.02;
+propellerLevel 5;        // 0.000625 m
+interfaceLevel 2;        // 0.01 m, used on both interface sides
+rotaryRegionLevel 3;     // 0.005 m
+innerCylinderLevel 2;    // 0.005 m
+outerCylinderLevel 1;    // 0.01 m
+acousticSphereLevel 0;   // 0.02 m
+propellerRefinementThickness 0.0015; // matches both original level-5 distance bands
 
-// Region cell sizes. Original level ordering: rotor/inner 3; outer/sphere 2.
-// Retain the current 0.01 m background and existing propeller/interface sizes.
-rotaryRegionCellSize 0.00625;
-innerCylinderCellSize 0.00625;
-outerCylinderCellSize 0.0125;
-acousticSphereCellSize 0.025;// 0.0125
+// Propeller layers: native cfMesh controls referenced by cfmeshRotorDict.
+propellerLayerCount 5;
+propellerLayerThicknessRatio 1.1;
+propellerLayerAllowDiscontinuity 0;
+// Metres. 1e30 is effectively uncapped for this geometry; reduce for a cap.
+// This is an upper bound, not an exact first-layer height or total thickness.
+propellerMaxFirstLayerThickness 1e-4;
+
+// Native layer optimisation (whole rotor region, before layer subdivision).
+// Enable for a controlled comparison; does not prescribe total layer thickness.
+layerOptimise 1;
+layerUntangle 1;
+layerSmoothNormalsIterations 5;
+layerMaxIterations 5;
+layerFeatureSizeFactor 0.3; // Curvature-based thickness limit, 0 <= value < 1.
+layerRecalculateNormals 1;
+layerRelativeThicknessTolerance 0.08; // 0 <= value < 1; lower enforces smoother thickness.

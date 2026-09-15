@@ -11,7 +11,7 @@ FoamFile
 
 
 
-// Baseline: pipeline --boundary-layers none; snappyHexMesh adds the layers.
+// Retained snappyHexMesh template; the current pipeline meshes with cfMesh dictionaries.
 // Which of the steps to run
 castellatedMesh $castellatedMesh;
 snap            $snap;

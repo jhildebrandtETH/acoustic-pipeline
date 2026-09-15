@@ -1,8 +1,13 @@
 FoamFile { version 2.0; format ascii; class dictionary; object cfmeshDomainDict; }
 // All coordinates and cell sizes are in metres. Shaft is Y through (0 0 0).
 scale 1;
-boxMin (-0.385 -0.650 -0.385);
-boxMax ( 0.385  0.385  0.385);
+// Bounds are derived per STL from the effective acoustic/refinement sphere R.
+// +Y inlet, -Y outlet. Fractions refer to distance from the propeller plane.
+boxSizing sphereRelative;
+lateralMargin 0.02; // Each X/Z wall at +/- R*(1 + lateralMargin).
+inletMargin 0.02;   // Inlet at +R*(1 + inletMargin).
+inletFraction 0.30; // Outlet distance = inlet distance*(1-f)/f: 70% wake.
+// For a fixed box, set boxSizing absolute and supply boxMin and boxMax.
 rotorRadiusFactor 0.6;  // radius / measured propeller span
 rotorHalfLength 0.025;
 cylinderSegments 256;

@@ -1,0 +1,6 @@
+// Shared native cfMesh entries, included by both rotor and stator dictionaries.
+// Add native cartesianMesh controls here using OpenFOAM dictionary syntax.
+// No Python changes are needed to pass additional native entries to cfMesh.
+// Keep region-specific localRefinement, boundaryLayers, objectRefinements and
+// workflowControls in cfmeshRotorDict / cfmeshStatorDict to avoid duplicate keys.
+// Native options omitted here retain the installed cfMesh version's defaults.

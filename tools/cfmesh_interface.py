@@ -45,6 +45,9 @@ def _project_rotating_interface(case):
     radius = geometry["rotor_radius_m"]
     half_length = geometry["rotor_half_length_m"]
     segments = geometry["cylinder_segments"]
+    from tools.cfmesh_controls import read_controls
+
+    controls = read_controls(case / "Parameters")["interfaceProjection"]
     mesh_directory = case / "constant/polyMesh"
     points_path = mesh_directory / "points"
     points_text = points_path.read_text()
@@ -99,7 +102,10 @@ def _project_rotating_interface(case):
         np.linalg.norm(points[interface_points] - original, axis=1).max()
     )
     # Only correct the chord-to-circle error, not an incorrectly meshed cylinder.
-    movement_limit = 1.5 * radius * (1 - math.cos(math.pi / segments)) + 1e-10
+    movement_limit = (
+        controls["movementLimitFactor"] * radius * (1 - math.cos(math.pi / segments))
+        + controls["absoluteTolerance"]
+    )
     if maximum_movement > movement_limit:
         raise ValueError(
             f"Interface needs {maximum_movement:g} m correction, exceeding the "

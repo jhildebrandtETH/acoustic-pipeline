@@ -63,7 +63,7 @@ class PipelineIntegrationTests(unittest.TestCase):
             case = Path(tmp)
             pipeline.preflight(SimpleNamespace(
                 sim_dir=case, mesh_only=True, mode="AMI", study=True,
-                study_file="cfmeshCommon", study_parameter="backgroundCellSize",
+                study_file="cfmeshCommon", study_parameter="baseCellSize",
             ))
             for role, utility in (("rotor", "cartesianMesh"), ("stator", "improveMeshQuality")):
                 region = case / "cfmesh" / role

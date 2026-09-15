@@ -1,0 +1,22 @@
+FoamFile { version 2.0; format ascii; class dictionary; object cfmeshPipelineDict; }
+// Pipeline controls, not native cartesianMesh entries. See cfmeshGuide.md.
+// Defaults preserve the existing meshing and acceptance behavior.
+improveMeshQuality
+{
+    enabled true;          // Applies after workflowControls/stopAfter edgeExtraction.
+    nLoops 2;
+    nIterations 20;
+    nSurfaceIterations 0;
+}
+interfaceProjection
+{
+    enabled true;          // Project both interface patches onto the same cylinder.
+    movementLimitFactor 1.5; // Multiplier on the polygon chord-to-circle error.
+    absoluteTolerance 1e-10; // Additional allowed movement, metres.
+}
+acceptance
+{
+    maxRelativeVolumeError 0.005; // Fraction: 0.005 = 0.5%.
+    minimumFaceCoverage 0.95;
+    minimumAverageCoverage 0.999;
+}

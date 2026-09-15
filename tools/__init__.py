@@ -71,7 +71,6 @@ _EXPORTS = {
     'make_folder_safe': 'openfoam',
     'merge_postprocessing_dat_files': 'openfoam',
     'parse_end_on': 'openfoam',
-    'prepare_case_for_cfmesh': 'common',
     'processor_deletion_is_safe': 'openfoam',
     'reactivate_failed_cases_for_resume': 'scheduler',
     'read_mesh_element_types': 'reporting',
@@ -84,9 +83,7 @@ _EXPORTS = {
     'remove_stale_stopped_container': 'common',
     'report_case_stage': 'common',
     'reset_case_folder': 'openfoam',
-    'resolve_cfmesh_executable': 'common',
     'resume_status_after_solver_failure': 'scheduler',
-    'run_cfmesh_boundary_layer_process': 'common',
     'run_convergence_monitor': 'openfoam',
     'run_openfoam_command': 'common',
     'run_parallel_scheduler': 'scheduler',
@@ -101,7 +98,6 @@ _EXPORTS = {
     'update_parameter': 'openfoam',
     'validate_acoustic_arguments': 'common',
     'validate_visualization_images': 'visualization',
-    'verify_openfoam_patch_exists': 'common',
     'visualization_settings': 'visualization',
 }
 

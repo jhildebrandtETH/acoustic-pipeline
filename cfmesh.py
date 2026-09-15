@@ -2,11 +2,11 @@
 from tools.cfmesh_pipeline import run_mesh
 
 
-def cfmesh(container, case, cores, layers="dict", allow_bad=False,
+def cfmesh(container, case, cores, allow_bad=False,
            callback=None, live=False):
     """Mesh both regions, assemble the rotating zone, and check NCC and quality.
 
     Edit Parameters/cfmesh*. The implementation and geometry helpers live in
     tools/cfmesh_pipeline.py; the native meshing commands are unchanged.
     """
-    return run_mesh(container, case, cores, layers, allow_bad, callback, live)
+    return run_mesh(container, case, cores, allow_bad, callback, live)

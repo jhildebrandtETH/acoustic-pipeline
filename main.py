@@ -43,7 +43,6 @@ def main() -> None:
             f"{('-' + str(order.get('max_cores_per_case'))) if order.get('max_cores_per_case', order['cores_per_case']) != order['cores_per_case'] else ''}\n"
             f"  max parallel cases: {order['max_parallel_cases']}\n"
             f"  field init        : {args.field_init}\n"
-            f"  boundary layers   : {args.boundary_layers}\n"
         )
 
         run_parallel_scheduler(

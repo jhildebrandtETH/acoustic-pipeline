@@ -93,16 +93,6 @@ def create_parser():
     )
     parser.add_argument("--allow-bad-mesh", action="store_true")
     parser.add_argument(
-        "--boundary-layers",
-        choices=["dict", "cfmesh", "none"],
-        default="dict",
-        help=(
-            "dict: use cfmeshRotorDict/cfmeshStatorDict unchanged (default); "
-            "none: force no layers in both; cfmesh: enable the complete native "
-            "rotor workflow, with layer subdivision from its dictionary."
-        ),
-    )
-    parser.add_argument(
         "--end-on",
         nargs="+",
         default=["convergence"],

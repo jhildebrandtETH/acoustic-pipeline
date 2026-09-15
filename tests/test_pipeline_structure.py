@@ -124,10 +124,15 @@ class PipelineStructureTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-I', str(ROOT / 'main.py'), '--help'],
                                     cwd=tmp, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('--boundary-layers', result.stdout)
+            self.assertNotIn('--boundary-layers', result.stdout)
+            self.assertIn('--mesh-only', result.stdout)
 
     def test_new_order_and_resume_keep_stored_settings(self):
         with tempfile.TemporaryDirectory() as tmp, patch('tools.orders.preflight'):
+            # Order parsing does not read geometry; provide a named input fixture
+            # instead of depending on the optional bundled example STL.
+            (Path(tmp) / 'STL').mkdir()
+            (Path(tmp) / 'STL/10x7E.stl').write_text('solid fixture\nendsolid fixture\n')
             parser = create_parser()
             args = parser.parse_args(['--sim-dir', tmp, '--rpms', '4000',
                                       '--mode', 'AMI', '--turbulence', 'kOmegaSST', '--wall-functions', 'no',
@@ -136,8 +141,13 @@ class PipelineStructureTests(unittest.TestCase):
             self.assertIn('10x7E', meshes)
             self.assertTrue(order['mesh_only'])
             self.assertEqual(order['total_cores'], 4)
+            self.assertNotIn('boundary_layers', order)
+            # Obsolete metadata must not re-enable CLI workflow overrides on resume.
+            order['boundary_layers'] = 'none'
+            (Path(tmp) / 'simulation_order.json').write_text(json.dumps(order))
             resumed = parser.parse_args(['--sim-dir', tmp, '--resume'])
             _, _, _, _, restored = prepare_simulation_order(resumed, parser)
             self.assertTrue(resumed.mesh_only)
             self.assertEqual(resumed.rpms, [4000])
             self.assertEqual(restored['cases'], order['cases'])
+            self.assertFalse(hasattr(resumed, 'boundary_layers'))

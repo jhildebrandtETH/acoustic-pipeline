@@ -475,11 +475,6 @@ def ensure_scheduler_metadata(
 
     order["schema_version"] = 2
 
-    # Boundary-layer metadata was introduced after scheduler schema v2.
-    # Legacy orders keep their historical behavior unless the values were
-    # explicitly stored when the order was created.
-    order.setdefault("boundary_layers", "none")
-
     if any("depends_on" not in case for case in order.get("cases", [])):
         add_field_initialization_dependencies(
             order["cases"],
@@ -891,7 +886,6 @@ def execute_simulation_case(
                     NUMBER_OF_CORES=allocated_cores,
                     MESH_ONLY=args.mesh_only,
                     ALLOW_BAD_MESH=args.allow_bad_mesh,
-                    BOUNDARY_LAYER_METHOD=args.boundary_layers,
                     LIVE_OUTPUT=getattr(args, "live_output", False),
                     STATUS_CALLBACK=callback,
                 )
@@ -1000,7 +994,6 @@ def execute_simulation_case(
                     NUMBER_OF_CORES=allocated_cores,
                     MESH_ONLY=args.mesh_only,
                     ALLOW_BAD_MESH=args.allow_bad_mesh,
-                    BOUNDARY_LAYER_METHOD=args.boundary_layers,
                     LIVE_OUTPUT=getattr(args, "live_output", False),
                     STATUS_CALLBACK=callback,
                 )
@@ -1040,16 +1033,6 @@ def execute_simulation_case(
             # POSTPROCESSING
             # --------------------------------------------------------------
             if status == "solver_done":
-                if args.mesh_only:
-                    order_store.set_status(
-                        folder_name,
-                        "postprocessing_done",
-                        error=None,
-                        resume_status=None,
-                    )
-                    status = "postprocessing_done"
-                    continue
-
                 registry.update(
                     folder_name,
                     stage="postprocessing",
@@ -1059,6 +1042,7 @@ def execute_simulation_case(
 
                 from postprocessing import postprocessing
                 postprocessing(
+                    MESH_ONLY=args.mesh_only,
                     AERODYNAMICS_ONLY=args.aerodynamics_only,
                     ACOUSTIC_SURFACE=args.acoustic_surface,
                     SIMULATION_WORKING_DIRECTORY=simulation_path,

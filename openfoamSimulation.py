@@ -34,7 +34,6 @@ def openfoamSimulation(
     MESH_ONLY,
     END_ON_MODE,
     ALLOW_BAD_MESH,
-    BOUNDARY_LAYER_METHOD="cfmesh",
     initialize_from_previous=False,
     previous_simulation_path=None,
     STATUS_CALLBACK=None,
@@ -56,13 +55,6 @@ def openfoamSimulation(
     simulation_working_directory = Path(simulation_working_directory)
     number_of_cores = int(NUMBER_OF_CORES)
     parallel_run = number_of_cores > 1
-    boundary_layer_method = str(BOUNDARY_LAYER_METHOD).strip().lower()
-
-    if boundary_layer_method not in {"none", "cfmesh", "dict"}:
-        raise ValueError(
-            "BOUNDARY_LAYER_METHOD must be dict, none, or cfmesh"
-        )
-
     if number_of_cores < 1:
         raise ValueError("NUMBER_OF_CORES must be at least 1")
 
@@ -123,7 +115,7 @@ def openfoamSimulation(
             from tools.cfmesh_pipeline import docker_run
             mesh_ok = cfmesh(
                 container, simulation_working_directory, number_of_cores,
-                boundary_layer_method, ALLOW_BAD_MESH, STATUS_CALLBACK, LIVE_OUTPUT,
+                ALLOW_BAD_MESH, STATUS_CALLBACK, LIVE_OUTPUT,
             )
             if MESH_ONLY:
                 report_case_stage(

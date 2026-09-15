@@ -30,9 +30,9 @@ Case preparation -> cfMesh -> mesh checks -> OpenFOAM flow solution
 
 Run the pipeline in **Linux or a Linux distribution under WSL 2**. Use a Linux
 terminal for all commands below. Native Windows Python is not the supported full
-pipeline runtime; order locking and the standalone cfMesh helper require Linux.
+pipeline runtime; order locking requires Linux.
 
-You need Git, Conda, Docker, and `curl` or `wget` plus `tar`. Allocate enough RAM and
+You need Git, Conda and Docker. Allocate enough RAM and
 disk space for the mesh, concurrent cases, saved timesteps and acoustic samples.
 `--total-cores` limits CPU allocation; it does not impose a memory limit.
 Specify `--cores-per-case` for every new order. With 100 total cores and 20 cores per case, up to 5 cases run concurrently and the remaining cases queue. Unused remainder cores stay idle; field-initialization dependencies may further reduce concurrency. Resume keeps the saved allocation.
@@ -97,31 +97,13 @@ docker pull microfluidica/openfoam:13
 | --- | --- |
 | `opencfd/openfoam-default:2512` | Native cfMesh utilities and dictionary operations |
 | `microfluidica/openfoam:13` | Mesh assembly, non-conformal coupling (NCC), checks and flow solution |
-| Host `generateBoundaryLayers` | Standalone layer-generation utility |
 
 These images are used for different stages. Do not substitute one for the other.
 The pipeline sources the appropriate OpenFOAM environment **inside each container**;
 a host OpenFOAM installation is not required. Docker bind mounts expose the case
 and its `Parameters/` directory to the tools.
 
-### 5. Install the cfMesh helper
-
-```bash
-bash setup_cfmesh.sh
-```
-
-The installer downloads the standalone Linux cfMesh 1.2.0 binaries and checks
-`generateBoundaryLayers`. The default installation is discovered automatically.
-For an existing custom installation:
-
-```bash
-export CFMESH_BIN=/absolute/path/to/generateBoundaryLayers
-```
-
-Use the executable path, not its directory. The current preflight checks this
-helper even when a particular mesh configuration will not add layers.
-
-### 6. Enable report visuals
+### 5. Enable report visuals
 
 Install [ParaView](https://www.paraview.org/download/) on the simulation host,
 including its `pvpython` or `pvbatch` executable. It runs in its own Python runtime;
@@ -142,7 +124,7 @@ ParaView is optional for solving. Without a working renderer, the report records
 missing visuals rather than inventing them. Set `"required": true` in a case's
 `visualization.json` if missing/partial visuals should fail postprocessing.
 
-### 7. Check the installation
+### 6. Check the installation
 
 ```bash
 python -m tools.cfmesh_runtime --smoke-test
@@ -185,7 +167,10 @@ python main.py --sim-dir ~/simulations/propeller_mesh \
 
 Open the generated case's `sim.foam` in ParaView and inspect the blade surface,
 near-wall cells, rotor/stator interface and mesh-quality logs. `--mesh-only` stops
-after meshing and checks; it does not solve the flow or run acoustics.
+after meshing, checks and a mesh-view report (`report/simulation_report.pdf`).
+The report uses the existing mesh sections, blade surface and layer close-ups;
+it does not solve the flow or run acoustics. ParaView rendering availability and
+any missing views are recorded in the report and `report/visuals/manifest.json`.
 
 ### Run aerodynamics
 
@@ -238,13 +223,13 @@ Resolved kEpsilon uses the [Launder-Sharma low-Re formulation](https://doc.cfd.d
 Resolved SST/DES evaluates its viscous omega boundary condition using runtime-compiled
 OpenFOAM code. See [CoreTemplates/README.md](CoreTemplates/README.md) for details.
 
-`--boundary-layers` controls **mesh layer generation**, independently of wall treatment:
-
-| Value | Behavior |
-| --- | --- |
-| `dict` (default) | Follow the rotor and stator mesh dictionaries |
-| `cfmesh` | Enable the complete native rotor workflow, including dictionary-controlled layer subdivision |
-| `none` | Disable layers in both regions |
+Layer generation is part of the native `cartesianMesh` workflow and is controlled
+only by `Parameters/cfmeshRotorDict` and `Parameters/cfmeshStatorDict`.
+Shared layer values and optimisation controls are in `cfmeshCommon.cpp`.
+See [the boundary-layer guide](Parameters/cfmeshLayerGuide.md) for thickness
+control and diagnosing uneven outer layers.
+For a no-layer region, use `workflowControls { stopAfter edgeExtraction; }`
+in that region dictionary. Wall treatment remains a separate solver choice.
 
 ## Run options
 
@@ -287,8 +272,8 @@ Studies require one STL and one RPM. Values are separated by `...`:
 python main.py --sim-dir ~/simulations/mesh_study \
   --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
   --total-cores 4 --cores-per-case 4 --mesh-only --study \
-  --study-file cfmeshCommon --study-parameter propellerCellSize \
-  --study-values '0.00125...0.000625' --live-output
+  --study-file cfmeshCommon --study-parameter propellerLevel \
+  --study-values '4...5...6' --live-output
 ```
 
 Populate this order's `STL/` first. Study files are names from `Parameters/`;
@@ -303,15 +288,20 @@ subsequent source edits do not change an existing run.
 
 | Location | Controls |
 | --- | --- |
-| `Parameters/cfmeshDomainDict` | STL scale, fluid domain and rotor dimensions |
-| `Parameters/cfmeshCommon.cpp` | Cell sizes and propeller refinement thickness |
+| `Parameters/cfmeshDomainDict` | STL scale, sphere-relative domain margins, inlet/wake split and rotor dimensions |
+| `Parameters/cfmeshCommon.cpp` | Base cell size, refinement levels, propeller refinement thickness and blade layer values |
+| `Parameters/cfmeshGlobalDict` | Additional shared native cfMesh controls |
 | `Parameters/cfmeshRefinementDict` | Refinement cylinders and spheres |
 | `Parameters/cfmeshRotorDict` | Rotor refinement, layers and workflow |
 | `Parameters/cfmeshStatorDict` | Stator refinement and workflow |
+| `Parameters/cfmeshPipelineDict` | Quality improvement, interface projection and mesh acceptance thresholds |
 | `Parameters/controlDict.cpp` | Time stepping, saved-field cadence and retention |
 | `Parameters/rotational_parameters.cpp` | Angular velocity, set from the requested RPM |
 | `CoreTemplates/<mode>/<model>/<treatment>/` | Initial fields, boundary conditions and solver dictionaries |
 | `<case>/visualization.json` | Optional rendering settings |
+
+See [the cfMesh editing guide](Parameters/cfmeshGuide.md) for dictionary precedence,
+custom native settings, layer studies and the effective settings saved for each case.
 
 ## Results and reports
 
@@ -386,7 +376,6 @@ cannot recover deleted fields or acoustic surface recordings. `purgeWrite` in
 | Docker permission/connection error | Ensure the CLI and Python SDK can access the same daemon as your simulation user. |
 | Required image not found | Pull both tagged images listed in Installation. |
 | Editable acoustic package cannot be installed | Populate submodules and run environment creation from the repository root. |
-| `generateBoundaryLayers` not found | Run `bash setup_cfmesh.sh` or set `CFMESH_BIN` to the executable. |
 | No STL / missing example input | Place your geometry in `<order>/STL/`; do not depend on the optional example. |
 | Existing order rejected | Use `--resume`, or create a separate order for changed settings. |
 | Mesh quality checks fail | Inspect the mesh and logs, then adjust geometry/refinement/layers. `--allow-bad-mesh` is a diagnostic override, not a quality fix. |
