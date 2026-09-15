@@ -76,6 +76,10 @@ def create_parser():
             "--cores remains accepted as a backward-compatible alias."
         ),
     )
+    parser.add_argument(
+        "--cores-per-case", "--target-cores", dest="cores_per_case", type=int,
+        help="Required for new orders: CPU cores allocated to each case. Remaining cases queue until cores are available.",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--mesh-only",

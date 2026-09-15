@@ -366,8 +366,9 @@ def calculate_scheduler_layout(
     total_cores: int,
     field_init: str,
     study: bool,
+    cores_per_case: int | None = None,
 ) -> dict:
-    """Return slot count and near-equal core allocation for maximum throughput."""
+    """Return fixed-size slots; retain automatic allocation for legacy orders."""
     total_cores = int(total_cores)
 
     if total_cores < 1:
@@ -381,6 +382,19 @@ def calculate_scheduler_layout(
         parallel_units = len({case["mesh"] for case in cases})
     else:
         parallel_units = len(cases)
+
+    if cores_per_case is not None:
+        cores_per_case = int(cores_per_case)
+        if not 1 <= cores_per_case <= total_cores:
+            raise ValueError("cores_per_case must be between 1 and total_cores")
+        return {
+            "total_cores": total_cores,
+            "cores_per_case": cores_per_case,
+            "max_cores_per_case": cores_per_case,
+            "extra_core_slots": 0,
+            "max_parallel_cases": min(parallel_units, total_cores // cores_per_case),
+            "dependency_mode": dependency_mode,
+        }
 
     max_parallel_cases = max(1, min(parallel_units, total_cores))
     base_cores = max(1, total_cores // max_parallel_cases)
@@ -478,6 +492,7 @@ def ensure_scheduler_metadata(
         order["total_cores"],
         order.get("field_init", "off"),
         order.get("study", False),
+        cores_per_case=order.get("target_cores_per_case"),
     )
 
     order.setdefault("cores_per_case", layout["cores_per_case"])

@@ -55,7 +55,7 @@ class SolverOptionsTests(unittest.TestCase):
 
     def test_aerodynamic_order_and_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
-            args, order = self.order(tmp, '--rpms', '4000', '--total-cores', '2',
+            args, order = self.order(tmp, '--rpms', '4000', '--total-cores', '2', '--cores-per-case', '2',
                 '--mode', 'MRF', '--turbulence', 'kEpsilon', '--wall-functions', 'no',
                 '--aerodynamics-only')
             self.assertTrue(order['aerodynamics_only'])
@@ -64,9 +64,21 @@ class SolverOptionsTests(unittest.TestCase):
             self.assertEqual(resumed.wall_functions, 'no')
             self.assertTrue(resumed.aerodynamics_only)
             self.assertEqual(resumed.mode, 'MRF')
+            self.assertEqual(restored['target_cores_per_case'], 2)
+            self.assertEqual(resumed.cores_per_case, 2)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.order(tmp, '--resume', '--cores-per-case', '1')
+
+    def test_new_order_requires_valid_case_cores(self):
+        base = ['--rpms', '4000', '--total-cores', '2', '--mode', 'MRF',
+                '--turbulence', 'kEpsilon', '--wall-functions', 'no', '--mesh-only']
+        for extra in [[], ['--cores-per-case', '0'], ['--cores-per-case', '3']]:
+            with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self.order(tmp, *base, *extra)
 
     def test_invalid_new_order_options(self):
-        base = ['--rpms', '4000', '--total-cores', '2', '--mode', 'AMI', '--turbulence', 'DES']
+        base = ['--rpms', '4000', '--total-cores', '2', '--cores-per-case', '2', '--mode', 'AMI', '--turbulence', 'DES']
         for extra in [[], ['--wall-functions', 'yes'],
                       ['--wall-functions', 'no', '--acoustic-surface', 'impermeable']]:
             with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(io.StringIO()):
@@ -75,7 +87,7 @@ class SolverOptionsTests(unittest.TestCase):
 
     def test_legacy_resume_preserves_original_templates(self):
         with tempfile.TemporaryDirectory() as tmp:
-            _, order = self.order(tmp, '--rpms', '4000', '--total-cores', '2',
+            _, order = self.order(tmp, '--rpms', '4000', '--total-cores', '2', '--cores-per-case', '2',
                 '--mode', 'AMI', '--turbulence', 'kOmegaSST', '--wall-functions', 'no', '--mesh-only')
             del order['wall_functions']
             del order['aerodynamics_only']

@@ -1024,6 +1024,7 @@ def create_simulation_order(args, simulations_directory: Path):
         "meshes": args.meshes,
         "rpms": args.rpms,
         "total_cores": total_cores,
+        "target_cores_per_case": int(args.cores_per_case),
         "field_init": args.field_init,
         "mesh_only": args.mesh_only,
         "end_on": args.end_on,
@@ -1115,6 +1116,7 @@ def create_simulation_order(args, simulations_directory: Path):
     layout = calculate_scheduler_layout(
         cases=batch["cases"],
         total_cores=total_cores,
+        cores_per_case=args.cores_per_case,
         field_init=args.field_init,
         study=args.study,
     )

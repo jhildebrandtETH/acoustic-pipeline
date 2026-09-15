@@ -81,6 +81,13 @@ def prepare_simulation_order(args, parser):
                 "be decomposed with the stored core count."
             )
 
+        if args.cores_per_case is not None and (
+            int(args.cores_per_case) != int(raw_order.get("cores_per_case", 0))
+            or any(int(case.get("allocated_cores", 0)) != args.cores_per_case
+                   for case in raw_order.get("cases", []))
+        ):
+            parser.error("Changing --cores-per-case during --resume is disabled because cases may already be decomposed. Use the stored allocation or create a new order.")
+
         order = ensure_scheduler_metadata(
             raw_order,
             total_cores_override=args.total_cores if legacy_order else None,
@@ -95,6 +102,7 @@ def prepare_simulation_order(args, parser):
         args.study_parameter = order["study_parameter"]
         args.study_values = order["study_values"]
         args.total_cores = int(order["total_cores"])
+        args.cores_per_case = int(order["cores_per_case"])
         args.mesh_only = order["mesh_only"]
         args.allow_bad_mesh = order["allow_bad_mesh"]
         args.boundary_layers = order.get("boundary_layers", "none")
@@ -140,6 +148,8 @@ def prepare_simulation_order(args, parser):
             missing.append("--mode")
         if args.total_cores is None:
             missing.append("--total-cores")
+        if args.cores_per_case is None:
+            missing.append("--cores-per-case")
         if args.turbulence is None:
             missing.append("--turbulence")
         if args.wall_functions is None:
@@ -155,6 +165,8 @@ def prepare_simulation_order(args, parser):
 
         if args.total_cores is not None and args.total_cores < 1:
             parser.error("--total-cores must be at least 1")
+        if not 1 <= args.cores_per_case <= args.total_cores:
+            parser.error("--cores-per-case must be between 1 and --total-cores")
 
         if len(set(args.rpms or [])) != len(args.rpms or []):
             parser.error("--rpms must not contain duplicate values")

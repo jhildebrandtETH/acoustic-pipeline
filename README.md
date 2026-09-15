@@ -35,6 +35,7 @@ pipeline runtime; order locking and the standalone cfMesh helper require Linux.
 You need Git, Conda, Docker, and `curl` or `wget` plus `tar`. Allocate enough RAM and
 disk space for the mesh, concurrent cases, saved timesteps and acoustic samples.
 `--total-cores` limits CPU allocation; it does not impose a memory limit.
+Specify `--cores-per-case` for every new order. With 100 total cores and 20 cores per case, up to 5 cases run concurrently and the remaining cases queue. Unused remainder cores stay idle; field-initialization dependencies may further reduce concurrency. Resume keeps the saved allocation.
 
 | Host | Docker setup |
 | --- | --- |
@@ -179,7 +180,7 @@ dependency. Source, template and configuration directories cannot be used as out
 ```bash
 python main.py --sim-dir ~/simulations/propeller_mesh \
   --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
-  --total-cores 4 --mesh-only --live-output
+  --total-cores 4 --cores-per-case 4 --mesh-only --live-output
 ```
 
 Open the generated case's `sim.foam` in ParaView and inspect the blade surface,
@@ -195,7 +196,7 @@ mkdir -p ~/simulations/propeller_flow/STL
 cp ~/simulations/propeller_mesh/STL/*.stl ~/simulations/propeller_flow/STL/
 python main.py --sim-dir ~/simulations/propeller_flow \
   --rpms 4000 --mode MRF --turbulence kOmegaSST --wall-functions no \
-  --total-cores 4 --aerodynamics-only --end-on rev 20 --live-output
+  --total-cores 4 --cores-per-case 4 --aerodynamics-only --end-on rev 20 --live-output
 ```
 
 ### Run aeroacoustics
@@ -205,7 +206,7 @@ mkdir -p ~/simulations/propeller_acoustics/STL
 cp ~/simulations/propeller_mesh/STL/*.stl ~/simulations/propeller_acoustics/STL/
 python main.py --sim-dir ~/simulations/propeller_acoustics \
   --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
-  --total-cores 4 --acoustic-surface impermeable --end-on rev 20 --live-output
+  --total-cores 4 --cores-per-case 4 --acoustic-surface impermeable --end-on rev 20 --live-output
 ```
 
 The durations above are examples, not convergence guarantees. Allow the flow to
@@ -250,6 +251,7 @@ OpenFOAM code. See [CoreTemplates/README.md](CoreTemplates/README.md) for detail
 | Task | Options |
 | --- | --- |
 | Several speeds | `--rpms 3000 4000 5000` |
+| Cores per case (required for new orders) | `--cores-per-case 20` (`--target-cores` is an alias) |
 | Total CPU budget | `--total-cores 8` (`--cores` is an alias) |
 | Initialize each RPM from the previous one | `--field-init on` with ascending RPMs |
 | Independent cases | `--field-init off` (default) |
@@ -284,7 +286,7 @@ Studies require one STL and one RPM. Values are separated by `...`:
 ```bash
 python main.py --sim-dir ~/simulations/mesh_study \
   --rpms 4000 --mode AMI --turbulence kOmegaSST --wall-functions no \
-  --total-cores 4 --mesh-only --study \
+  --total-cores 4 --cores-per-case 4 --mesh-only --study \
   --study-file cfmeshCommon --study-parameter propellerCellSize \
   --study-values '0.00125...0.000625' --live-output
 ```

@@ -51,6 +51,20 @@ class PipelineStructureTests(unittest.TestCase):
         self.assertEqual(chained['max_parallel_cases'], 1)
         self.assertEqual(chained['cores_per_case'], 8)
 
+    def test_explicit_case_cores_limit_concurrency(self):
+        cases = [{'mesh': 'propeller', 'folder': f'rpm{i}'} for i in range(200)]
+        for total, target, slots in [(100, 20, 5), (100, 10, 10), (103, 20, 5)]:
+            layout = calculate_scheduler_layout(cases, total, 'off', False, target)
+            self.assertEqual(layout['max_parallel_cases'], slots)
+            tools.assign_case_core_allocations(cases, layout, 'off', False)
+            self.assertEqual({case['allocated_cores'] for case in cases}, {target})
+        chained = calculate_scheduler_layout(cases, 100, 'on', False, 20)
+        self.assertEqual(chained['max_parallel_cases'], 1)
+        self.assertEqual(chained['cores_per_case'], 20)
+        for invalid in [0, -1, 101]:
+            with self.assertRaises(ValueError):
+                calculate_scheduler_layout(cases, 100, 'off', False, invalid)
+
     def test_case_copy_preserves_previous_results_and_uses_current_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -117,7 +131,7 @@ class PipelineStructureTests(unittest.TestCase):
             parser = create_parser()
             args = parser.parse_args(['--sim-dir', tmp, '--rpms', '4000',
                                       '--mode', 'AMI', '--turbulence', 'kOmegaSST', '--wall-functions', 'no',
-                                      '--total-cores', '4', '--mesh-only'])
+                                      '--total-cores', '4', '--cores-per-case', '4', '--mesh-only'])
             _, _, meshes, _, order = prepare_simulation_order(args, parser)
             self.assertIn('10x7E', meshes)
             self.assertTrue(order['mesh_only'])
