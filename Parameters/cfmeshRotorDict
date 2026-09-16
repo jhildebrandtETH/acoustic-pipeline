@@ -3,6 +3,10 @@ FoamFile { version 2.0; format ascii; class dictionary; object meshDict; }
 #include "cfmeshGlobalDict"
 surfaceFile "constant/triSurface/domain.ftr";
 maxCellSize $backgroundCellSize;
+edgeMeshRefinement
+{
+    #includeIfPresent "cfmeshFeatures.generated"
+}
 localRefinement
 {
     propeller

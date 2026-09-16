@@ -301,9 +301,12 @@ def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=No
         resolution=resolution,
         sphere_radius=sizing_radius,
     )
+    from tools.cfmesh_features import prepare_features
+
+    features = prepare_features(case, source, scale, resolution)
     for role, patches in (("rotor", rotor), ("stator", stator)):
         region_directory = case / "cfmesh" / role
-        (region_directory / "constant/triSurface").mkdir(parents=True)
+        (region_directory / "constant/triSurface").mkdir(parents=True, exist_ok=True)
         (region_directory / "system").mkdir()
         (region_directory / "0").mkdir()
         shutil.copytree(parameters_directory, region_directory / "Parameters")
@@ -387,6 +390,7 @@ interpolationSchemes { default linear; } snGradSchemes { default corrected; }
         expected_rotor_volume_m3=float(rotor_cylinder.volume) - abs(signed_volume),
         acoustic_sphere_radius_m=sphere_radius,
         refinement_regions=refinements,
+        feature_refinements=features,
     )
     write(case / "cfmesh/geometry.json", json.dumps(report, indent=2) + "\n")
     (case / "sim.foam").touch()
@@ -459,6 +463,30 @@ def patch_info(case):
                 type=re.search(r"type\s+(\w+)", patch_dictionary)[1],
             )
     return patches
+
+
+def validate_mesh_volume(log_text, expected_volume, tolerance):
+    """Distinguish invalid cells from absent or out-of-tolerance volume output."""
+    if "Zero or negative cell volume detected" in log_text:
+        count = re.search(r"Number of negative volume cells:\s*(\d+)", log_text)
+        detail = f" ({count[1]} cells)" if count else ""
+        raise ValueError(
+            f"Mesh has zero or negative cell volumes{detail}; inspect log.checkMesh "
+            "and cfmesh/rotor/log.cartesianMesh. Increasing maxRelativeVolumeError "
+            "cannot fix invalid cells. No solver was started."
+        )
+    number_pattern = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    measured = re.search(r"Total volume\s*=\s*" + number_pattern, log_text)
+    if not measured:
+        raise ValueError("checkMesh did not report total fluid volume; inspect log.checkMesh")
+    volume = float(measured[1])
+    relative_error = abs(volume - expected_volume) / expected_volume
+    if not math.isfinite(volume) or relative_error > tolerance:
+        raise ValueError(
+            f"Assembled fluid volume {volume:g} m^3 differs from expected "
+            f"{expected_volume:g} m^3 by {relative_error:.3%}, exceeding "
+            f"maxRelativeVolumeError ({tolerance:g}); inspect log.checkMesh"
+        )
 
 
 def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
@@ -569,20 +597,10 @@ def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
     log_text = (case / "log.checkMesh").read_text()
     if not re.search(r"Number of regions:\s*2\b", log_text):
         raise ValueError("Expected two disconnected fluid regions before NCC coupling")
-    number_pattern = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
-    measured = re.search(r"Total volume\s*=\s*" + number_pattern, log_text)
     expected_volume = json.loads((case / "cfmesh/geometry.json").read_text())[
         "expected_fluid_volume_m3"
     ]
-    if (
-        not measured
-        or abs(float(measured[1]) - expected_volume) / expected_volume
-        > acceptance["maxRelativeVolumeError"]
-    ):
-        raise ValueError(
-            "Assembled fluid volume is missing or exceeds maxRelativeVolumeError "
-            f"({acceptance['maxRelativeVolumeError']:g}); inspect log.checkMesh"
-        )
+    validate_mesh_volume(log_text, expected_volume, acceptance["maxRelativeVolumeError"])
     quality_ok = "Mesh OK." in log_text and not re.search(
         r"Failed\s+\d+\s+mesh checks", log_text
     )

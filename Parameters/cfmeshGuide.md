@@ -15,6 +15,7 @@ These are OpenFOAM dictionary files, not compiled C++.
 | `cfmeshStatorDict` | Stator surface refinement and workflow; custom volume refinements |
 | `cfmeshDomainDict` | STL scale, sphere-relative box margins and inlet/wake split, rotor cylinder dimensions and segment count |
 | `cfmeshRefinementDict` | Generated volume refinement geometry, on/off switch and sphere surface resolution |
+| `cfmeshFeatureDict` | Explicit OBJ feature groups, refinement levels and thicknesses |
 | `cfmeshPipelineDict` | Quality improvement iterations, cylinder projection and acceptance thresholds |
 
 Lengths and cell sizes are in metres. Geometry factors multiply the measured
@@ -99,6 +100,52 @@ For a blade resolution study use:
 Each geometry report records the base size, requested levels and physical sizes.
 
 ## Native mesher settings
+
+### Explicit feature curves
+
+Place a `FEATURES` folder next to your order's `STL` folder:
+
+```text
+my-order/
+  STL/10x7E.stl
+  FEATURES/10x7E_le.obj
+  FEATURES/10x7E_te.obj
+  FEATURES/10x7E_tip.obj
+  FEATURES/10x7E_hub.obj
+```
+
+The prefix comes from the selected STL filename, so `12x6.stl` uses
+`12x6_le.obj`, `12x6_te.obj`, `12x6_tip.obj`, and `12x6_hub.obj`.
+
+Edit `Parameters/cfmeshFeatureDict` before starting a new order. `le/level`,
+`te/level`, `tip/level`, and `hub/level` independently select the refinement; `refinementThickness`
+in each group sets the surrounding refinement distance in metres. Level 6
+with a 0.02 m base requests 0.3125 mm cells. Levels are relative to the background,
+not added to `propellerLevel`; overlapping requests use the finer refinement.
+Set `enabled false` to disable all feature refinement, or remove a group from
+`groups` to disable that group. Add another suffix and matching dictionary block
+to support additional feature curves beyond `groups (le te tip hub)`.
+
+The OBJ files must contain explicit `v` vertices and `l` line/polyline elements.
+Face-only OBJ exports are rejected. Export curves in the same coordinate system
+and units as the STL: `cfmeshDomainDict/scale` is applied to both. Missing files
+are warned about and skipped, so existing STL-only orders still work.
+
+The pipeline snapshots source curves in each case's `FEATURES` folder and writes
+scaled curves to `cfmesh/rotor/constant/triSurface/features`. Generated native
+`edgeMeshRefinement` entries affect the rotor only and are independent of the
+volume refinement switch. The geometry report records files, hashes, settings
+and missing groups. Existing order/case parameter snapshots must be updated or
+a fresh order created to use newly edited repository parameters.
+
+For a tip refinement study use:
+
+```text
+--study --study-file cfmeshFeatureDict --study-parameter tip/level --study-values '5...6...7'
+```
+
+These controls use cfMesh's native edge refinement interface described in the
+[cfMesh user guide, section 4.3](https://cfmesh.com/wp-content/uploads/2015/09/User_Guide-cfMesh_v1.1.pdf).
 
 `cfmeshRotorDict` and `cfmeshStatorDict` are complete native `meshDict` inputs.
 Additional entries are passed through without a Python whitelist. Put common

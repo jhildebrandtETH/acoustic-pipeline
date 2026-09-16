@@ -3,7 +3,7 @@
 // Nonnegative integer levels; level 0 is the background resolution.
 // Derived native cell sizes are in cfmeshSizes.cpp; edit inputs here for studies.
 baseCellSize 0.02;
-propellerLevel 5;        // 0.000625 m
+propellerLevel 4;        // 0.000625 m
 interfaceLevel 2;        // 0.01 m, used on both interface sides
 rotaryRegionLevel 3;     // 0.005 m
 innerCylinderLevel 2;    // 0.005 m
@@ -24,7 +24,7 @@ propellerMaxFirstLayerThickness 1e-4;
 layerOptimise 1;
 layerUntangle 1;
 layerSmoothNormalsIterations 5;
-layerMaxIterations 5;
-layerFeatureSizeFactor 0.3; // Curvature-based thickness limit, 0 <= value < 1.
+layerMaxIterations 15; // Quality trial: increased from 5; compare full checkMesh results.
+layerFeatureSizeFactor 0.2; // Curvature-based thickness limit, 0 <= value < 1.
 layerRecalculateNormals 1;
 layerRelativeThicknessTolerance 0.08; // 0 <= value < 1; lower enforces smoother thickness.

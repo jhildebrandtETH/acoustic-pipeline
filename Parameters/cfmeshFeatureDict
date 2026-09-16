@@ -1,0 +1,29 @@
+FoamFile { version 2.0; format ascii; class dictionary; object cfmeshFeatureDict; }
+
+// Reads FEATURES/<STL name>_<group>.obj alongside the order's STL folder.
+// Missing files are reported and skipped. OBJ coordinates use the STL scale.
+enabled true;
+groups (le te tip hub);
+
+// Levels are relative to baseCellSize, NOT additional to propellerLevel.
+// Thickness is in metres; 0 refines only cells intersected by the curves.
+le
+{
+    level 6;
+    refinementThickness 0.0005;
+}
+te
+{
+    level 6;
+    refinementThickness 0.0005;
+}
+tip
+{
+    level 6;
+    refinementThickness 0.0005;
+}
+hub
+{
+    level 6;
+    refinementThickness 0.0005;
+}
