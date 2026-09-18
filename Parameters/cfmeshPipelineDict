@@ -10,7 +10,7 @@ improveMeshQuality
 }
 interfaceProjection
 {
-    enabled true;          // Project both interface patches onto the same cylinder.
+    enabled false;          // Project both interface patches onto the same cylinder.
     movementLimitFactor 3.0; //1.5 // Multiplier on the polygon chord-to-circle error.
     absoluteTolerance 1e-10; // Additional allowed movement, metres.
 }

@@ -22,6 +22,7 @@ class ParameterTests(unittest.TestCase):
             **{region + "Level": "2" for region in parameters.REGIONS},
         }
         self.addCleanup(patch.stopall)
+        patch.object(parameters, "query_entries", side_effect=lambda path, entries: {entry: self.values[entry] for entry in entries}).start()
         patch.object(parameters, "query", side_effect=lambda path, entry: self.values[entry]).start()
         patch.object(parameters, "optional", side_effect=lambda path, entry: self.values.get(entry)).start()
 

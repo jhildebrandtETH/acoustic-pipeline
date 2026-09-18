@@ -4,6 +4,7 @@ from tools.cfmesh_runtime import (
     command as native_command,
     run as native_run,
     preflight as native_preflight,
+    phase as native_phase,
 )
 import json
 import math
@@ -73,6 +74,26 @@ def optional(path, entry):
         return None
 
 
+def query_entries(path, entries):
+    """Read related entries in one Docker exec while retaining OpenFOAM parsing."""
+    entries = tuple(entries)
+    if not entries:
+        return {}
+    path = Path(path).resolve()
+    result = native_run(
+        ["bash", "-c", 'dictionary=$1; shift; for entry in "$@"; do '
+         'foamDictionary "$dictionary" -entry "$entry" -value || exit $?; '
+         'printf "\\0"; done', "dictionary", path, *entries],
+        cwd=path.parent, text=True, capture_output=True,
+    )
+    if result.returncode:
+        raise ValueError(f"Cannot read {path} entries {entries}: {result.stderr.strip()}")
+    values = result.stdout.split("\0")
+    if len(values) != len(entries) + 1 or values[-1]:
+        raise ValueError(f"Unexpected dictionary output for {path}")
+    return dict(zip(entries, (value.strip() for value in values[:-1])))
+
+
 def parameter_file(parameters, name, *, read_only=False):
     if not name or Path(name).name != name or "\\" in name or name in {".", ".."}:
         raise ValueError("Study file must be a filename in Parameters, without a path")
@@ -85,6 +106,11 @@ def parameter_file(parameters, name, *, read_only=False):
 
 
 def preflight(args):
+    with native_phase(ROOT, "preflight"):
+        _preflight(args)
+
+
+def _preflight(args):
     safe_path(args.sim_dir)
     native_preflight()
     # Load native acoustic libraries before long-running worker threads start.
@@ -168,6 +194,11 @@ def write_ftr(path, patches):
 
 
 def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=None):
+    with native_phase(case, "preparation"):
+        return _prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study)
+
+
+def _prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=None):
     import numpy as np
     import trimesh
     from tools.geometry import read_stl
@@ -184,10 +215,12 @@ def prepare_geometry(case, source, acoustic_surface, acoustic_diameter, study=No
             stdout=subprocess.DEVNULL,
         )
     domain_dictionary = parameters_directory / "cfmeshDomainDict"
-    scale = float(query(domain_dictionary, "scale"))
-    factor = float(query(domain_dictionary, "rotorRadiusFactor"))
-    rotor_half_length = float(query(domain_dictionary, "rotorHalfLength"))
-    segments = int(query(domain_dictionary, "cylinderSegments"))
+    dimensions = query_entries(domain_dictionary,
+                               ("scale", "rotorRadiusFactor", "rotorHalfLength", "cylinderSegments"))
+    scale = float(dimensions["scale"])
+    factor = float(dimensions["rotorRadiusFactor"])
+    rotor_half_length = float(dimensions["rotorHalfLength"])
+    segments = int(dimensions["cylinderSegments"])
     if (
         not all(math.isfinite(x) and x > 0 for x in (scale, factor, rotor_half_length))
         or segments < 32
@@ -493,31 +526,36 @@ def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
     case = safe_path(case)
     from tools.cfmesh_controls import read_controls, improvement_command
 
-    controls = read_controls(case / "Parameters")
-    acceptance = controls["acceptance"]
-    write(case / "cfmesh/pipeline-controls.json", json.dumps(
-        dict(controls=controls, allow_bad_mesh=allow_bad),
-        indent=2,
-    ) + "\n")
+    with native_phase(case, "mesh"):
+        controls = read_controls(case / "Parameters")
+        acceptance = controls["acceptance"]
+        write(case / "cfmesh/pipeline-controls.json", json.dumps(
+            dict(controls=controls, allow_bad_mesh=allow_bad),
+            indent=2,
+        ) + "\n")
+        for role in ("rotor", "stator"):
+            region_directory = case / "cfmesh" / role
+            mesh_dictionary = region_directory / "system/meshDict"
+            # Expand the user's complete dictionary, preserving native cfMesh controls.
+            effective = query(mesh_dictionary)
+            write(region_directory / "system/meshDict", effective + "\n")
+            stop = optional(mesh_dictionary, "workflowControls/stopAfter")
+            if stop not in (None, "edgeExtraction"):
+                raise ValueError(
+                    "Only a complete cfMesh run or stopAfter edgeExtraction is supported"
+                )
+            native_mesh_run(case, role, ["cartesianMesh"], cores, callback, live)
+            if stop:
+                log_text = (region_directory / "log.cartesianMesh").read_text()
+                if "Stopping after step edgeExtraction" not in log_text:
+                    raise RuntimeError("Mesher did not honour the required no-layer stop")
+                command = improvement_command(controls)
+                if command:
+                    native_mesh_run(case, role, command, cores, callback, live)
+    # Native meshing has finished and its helper is gone before Foundation starts.
+    if callable(container):
+        container = container()
     for role in ("rotor", "stator"):
-        region_directory = case / "cfmesh" / role
-        mesh_dictionary = region_directory / "system/meshDict"
-        # Expand the user's complete dictionary, preserving native cfMesh controls.
-        effective = query(mesh_dictionary)
-        write(region_directory / "system/meshDict", effective + "\n")
-        stop = optional(mesh_dictionary, "workflowControls/stopAfter")
-        if stop not in (None, "edgeExtraction"):
-            raise ValueError(
-                "Only a complete cfMesh run or stopAfter edgeExtraction is supported"
-            )
-        native_mesh_run(case, role, ["cartesianMesh"], cores, callback, live)
-        if stop:
-            log_text = (region_directory / "log.cartesianMesh").read_text()
-            if "Stopping after step edgeExtraction" not in log_text:
-                raise RuntimeError("Mesher did not honour the required no-layer stop")
-            command = improvement_command(controls)
-            if command:
-                native_mesh_run(case, role, command, cores, callback, live)
         docker_run(
             container,
             case,

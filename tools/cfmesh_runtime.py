@@ -1,14 +1,98 @@
 """Docker runtime for native OpenCFD utilities; no host OpenFOAM needed."""
 
 import argparse
+import atexit
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 import os
+import re
 from pathlib import Path
 import subprocess
+import threading
+import uuid
+import warnings
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "opencfd/openfoam-default:2512"
 FOUNDATION_IMAGE = "microfluidica/openfoam:13"
+
+
+class RuntimePool:
+    """Reuse helpers within this Python process, including scheduler threads."""
+
+    def __init__(self, label="utility"):
+        self._containers = {}
+        self._lock = threading.Lock()
+        self._session = uuid.uuid4().hex[:12]
+        self._label = re.sub(r"[^a-zA-Z0-9_.-]", "-", label)[:70]
+
+    def container(self, image, mounts):
+        key = (image, tuple(mounts))
+        with self._lock:
+            if key not in self._containers:
+                flavor = "native" if image == IMAGE else "foundation"
+                name = f"acoustic-pipeline-{flavor}-{self._label}-{self._session}-{len(self._containers) + 1}"
+                launch = ["docker", "run", "--detach", "--rm", "--name", name,
+                          "--label", "acoustic-pipeline-role=utility"]
+                if hasattr(os, "getuid"):
+                    launch += ["--user", f"{os.getuid()}:{os.getgid()}"]
+                launch += [*mounts, "--entrypoint", "/bin/bash", image,
+                           "-c", "exec sleep infinity"]
+                # Register before launch so interruption/ambiguous CLI failures
+                # still leave an owned name for exit cleanup. Never adopt others.
+                self._containers[key] = name
+                try:
+                    subprocess.run(launch, check=True, stdout=subprocess.PIPE, text=True)
+                except BaseException:
+                    self._remove(key)
+                    raise
+            return self._containers[key]
+
+    def close(self, strict=False):
+        """Remove only helpers created by this process; safe to call repeatedly."""
+        # Callers must finish their utility commands before closing the pool.
+        with self._lock:
+            failed = []
+            for key in list(self._containers):
+                name = self._containers[key]
+                if not self._remove(key):
+                    failed.append(name)
+            if strict and failed:
+                raise RuntimeError("Could not finish container phase; cleanup failed for " + ", ".join(failed))
+
+    def _remove(self, key):
+        name = self._containers.pop(key)
+        try:
+            result = subprocess.run(["docker", "rm", "--force", name],
+                                    capture_output=True, text=True, timeout=15)
+            if result.returncode and "No such container" not in result.stderr:
+                warnings.warn(f"Could not remove utility container {name}: {result.stderr.strip()}")
+                return False
+        except (OSError, subprocess.SubprocessError) as error:
+            warnings.warn(f"Could not remove utility container {name}: {error}")
+            return False
+        return True
+
+
+_POOL = RuntimePool()
+atexit.register(_POOL.close)
+_PHASE = ContextVar("cfmesh_runtime_phase", default=None)
+
+
+@contextmanager
+def phase(case, name):
+    """Own one native helper for this phase, isolated from other case threads."""
+    case = Path(case).resolve()
+    pool = RuntimePool(f"{case.name[:50]}-{name}")
+    token = _PHASE.set((case, pool))
+    try:
+        yield pool
+    finally:
+        try:
+            pool.close(strict=True)
+        finally:
+            _PHASE.reset(token)
 
 
 def container_path(path):
@@ -22,7 +106,7 @@ def container_path(path):
 
 
 def command(argv, cwd=ROOT, cores=1, mounts=(), image=IMAGE):
-    """Build an argv-safe command, mounting the repository and complete case.
+    """Build an argv-safe exec command in a reusable, named helper container.
 
     Path arguments are translated to their bind-mount targets. String arguments
     remain literal (including dictionary values). Mounting the case ancestor
@@ -31,11 +115,19 @@ def command(argv, cwd=ROOT, cores=1, mounts=(), image=IMAGE):
     cwd = Path(cwd).expanduser().resolve(strict=True)
     if int(cores) < 1:
         raise ValueError("cores must be at least 1")
-    case_root = next(
-        (p for p in (cwd, *cwd.parents) if (p / "Parameters").is_dir()), cwd
-    )
+    active = _PHASE.get()
+    # Region folders also contain Parameters. Use the phase's complete case
+    # mount so rotor/stator queries cannot each allocate another container.
+    case_root = active[0] if active else next(
+        (p for p in (cwd, *cwd.parents) if (p / "Parameters").is_dir()), cwd)
     roots = [ROOT, case_root, *(Path(p).resolve(strict=True) for p in mounts)]
     roots = list(dict.fromkeys(roots))
+    # A repository mount covers ordinary child cases. Keep separate mounts for
+    # paths with whitespace: OpenFOAM requires their whitespace-free aliases.
+    roots = sorted((root for root in roots if not any(
+        other in root.parents and not any(c.isspace() for c in str(root.relative_to(other)))
+        for other in roots
+    )), key=str)
     targets = {
         root: (f"/cfmesh/mount{index}" if any(c.isspace() for c in str(root))
                else container_path(root))
@@ -50,24 +142,33 @@ def command(argv, cwd=ROOT, cores=1, mounts=(), image=IMAGE):
                 return targets[root] if relative == "." else targets[root] + "/" + relative
         raise ValueError(f"Path is outside Docker mounts: {path}")
 
-    result = ["docker", "run", "--rm"]
-    if hasattr(os, "getuid"):
-        result += ["--user", f"{os.getuid()}:{os.getgid()}"]
+    mount_options = []
     for root in roots:
         if not root.is_dir():
             raise ValueError(f"Docker mount must be an existing directory: {root}")
         # Docker --mount uses comma-delimited fields; reject ambiguous paths.
         if "," in str(root):
             raise ValueError(f"Docker bind-mount paths cannot contain commas: {root}")
-        result += ["--mount", f"type=bind,source={root},target={targets[root]}"]
-    result += ["--workdir", mounted_path(cwd), "--env", f"OMP_NUM_THREADS={int(cores)}",
-               "--entrypoint", "/bin/bash", image, "-c"]
+        mount_options += ["--mount", f"type=bind,source={root},target={targets[root]}"]
+    # Translate/validate arguments before starting any container.
+    arguments = [mounted_path(arg) if isinstance(arg, Path) else str(arg) for arg in argv]
+    name = (active[1] if active else _POOL).container(image, mount_options)
+    result = ["docker", "exec", "--workdir", mounted_path(cwd),
+              "--env", f"OMP_NUM_THREADS={int(cores)}", name, "/bin/bash", "-c"]
     bashrc = ("/usr/lib/openfoam/openfoam2512/etc/bashrc" if image == IMAGE
               else "/opt/openfoam13/etc/bashrc")
     # Source only inside the container, without passing utility options to bashrc.
-    result += [f'cfmesh_args=("$@"); set --; source {bashrc} >/dev/null '
-               '&& exec stdbuf -oL -eL "${cfmesh_args[@]}"', "cfmesh"]
-    result += [mounted_path(arg) if isinstance(arg, Path) else str(arg) for arg in argv]
+    # Cache the exported OpenFOAM environment once per helper. Preserve each
+    # exec's cwd and allocated OpenMP threads rather than caching those values.
+    result += ['cfmesh_args=("$@"); cfmesh_threads=$OMP_NUM_THREADS; set --; '
+               'cfmesh_env=/tmp/acoustic-pipeline-environment; '
+               'if [[ -r "$cfmesh_env" ]]; then source "$cfmesh_env"; else '
+               f'source {bashrc} >/dev/null || exit $?; '
+               'export -p | sed -E \'/^declare -x (PWD|OLDPWD|SHLVL|OMP_NUM_THREADS)=/d\' '
+               '> "$cfmesh_env.$$" && mv "$cfmesh_env.$$" "$cfmesh_env" || exit $?; fi; '
+               'export OMP_NUM_THREADS=$cfmesh_threads; '
+               'exec stdbuf -oL -eL "${cfmesh_args[@]}"', "cfmesh"]
+    result += arguments
     return result
 
 

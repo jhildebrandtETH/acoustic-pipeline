@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from tools.cfmesh_controls import DEFAULTS, read_controls
 from tools import cfmesh_pipeline as pipeline
@@ -15,6 +15,9 @@ class ControlsTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.case = Path(self.temp.name)
+        batch = patch.object(pipeline, "query_entries", side_effect=lambda path, entries: {entry: self.query(path, entry) for entry in entries})
+        batch.start()
+        self.addCleanup(batch.stop)
         self.parameters = self.case / "Parameters"
         self.parameters.mkdir()
         (self.parameters / "cfmeshPipelineDict").touch()
@@ -63,25 +66,42 @@ class ControlsTests(unittest.TestCase):
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
                 self.values["improveMeshQuality/enabled"] = str(enabled).lower()
-                region = self.case / "cfmesh/rotor"
-                region.mkdir(parents=True, exist_ok=True)
-                (region / "log.cartesianMesh").write_text("Stopping after step edgeExtraction")
+                for role in ("rotor", "stator"):
+                    region = self.case / "cfmesh" / role
+                    region.mkdir(parents=True, exist_ok=True)
+                    (region / "log.cartesianMesh").write_text("Stopping after step edgeExtraction")
                 with patch.object(pipeline, "query", side_effect=self.query), \
                         patch.object(pipeline, "native_mesh_run") as native, \
                         patch.object(pipeline, "native_run") as edit, \
                         patch.object(pipeline, "docker_run", side_effect=RuntimeError("assembly reached")):
+                    def start_foundation():
+                        from tools.cfmesh_runtime import _PHASE
+                        self.assertIsNone(_PHASE.get())
+                        self.assertEqual([call.args[1] for call in native.call_args_list].count("stator"),
+                                         2 if enabled else 1)
+                        return None
                     with self.assertRaisesRegex(RuntimeError, "assembly reached"):
-                        pipeline.run_mesh(None, self.case, 2, False)
+                        pipeline.run_mesh(start_foundation, self.case, 2, False)
                 edit.assert_not_called()  # Dictionary mode preserves native controls.
                 commands = [call.args[2] for call in native.call_args_list]
                 expected = [["cartesianMesh"]]
                 if enabled:
                     expected.append(["improveMeshQuality", "-nLoops", "7", "-nIterations", "35", "-nSurfaceIterations", "4"])
-                self.assertEqual(commands, expected)
+                self.assertEqual(commands, expected * 2)
                 self.assertIn("customNativeControl 42;", (region / "system/meshDict").read_text())
                 snapshot = json.loads((self.case / "cfmesh/pipeline-controls.json").read_text())
                 self.assertEqual(snapshot["controls"]["acceptance"]["minimumFaceCoverage"], 0.97)
                 self.assertNotIn("boundary_layers", snapshot)
+
+    def test_meshing_failure_does_not_start_foundation(self):
+        start_foundation = Mock()
+        with patch.object(pipeline, "query", side_effect=self.query), \
+                patch.object(pipeline, "native_mesh_run", side_effect=RuntimeError("meshing failed")):
+            with self.assertRaisesRegex(RuntimeError, "meshing failed"):
+                pipeline.run_mesh(start_foundation, self.case, 2, False)
+        start_foundation.assert_not_called()
+        from tools.cfmesh_runtime import _PHASE
+        self.assertIsNone(_PHASE.get())
 
 
 if __name__ == "__main__":

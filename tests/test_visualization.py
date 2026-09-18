@@ -12,6 +12,130 @@ import tools.visualization as visualization
 
 
 class VisualizationTests(unittest.TestCase):
+    def test_renderer_discovery_prefers_native_then_windows_fallback(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(visualization.shutil, 'which', return_value='/usr/bin/pvpython'), \
+                patch.object(visualization, 'windows_paraview_candidates') as windows:
+            self.assertEqual(visualization.find_paraview_executable(), '/usr/bin/pvpython')
+            windows.assert_not_called()
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(visualization.shutil, 'which', return_value=None), \
+                patch.object(visualization, 'windows_paraview_candidates', return_value=iter(['/mnt/c/Program Files/ParaView/bin/pvpython.exe'])):
+            self.assertTrue(visualization.find_paraview_executable().endswith('pvpython.exe'))
+            with self.assertRaisesRegex(FileNotFoundError, 'ParaView executable not found'):
+                visualization.find_paraview_executable('/explicit/missing/pvpython')
+
+    def test_wsl_windows_launch_translates_paths_and_keeps_host_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+
+            def launch(command, **kwargs):
+                run_dir = kwargs['cwd']
+                settings = json.loads((run_dir / 'settings.json').read_text())
+                self.assertEqual(settings['case_path'], 'windows:' + str(root))
+                self.assertEqual(command[-2], 'windows:' + str(run_dir / 'render_visuals.py'))
+                self.assertEqual(command[-1], 'windows:' + str(run_dir / 'settings.json'))
+                self.assertIn('OMP_NUM_THREADS', kwargs['env']['WSLENV'])
+                (run_dir / 'result.json').write_text(json.dumps({
+                    'status': 'complete', 'views': [{'image': 'example.png'}], 'warnings': []}))
+                return MagicMock(returncode=0)
+
+            with patch.object(visualization, 'running_in_wsl', return_value=True), \
+                    patch.object(visualization, 'find_paraview_executable', return_value='/mnt/c/ParaView/pvpython.exe'), \
+                    patch.object(visualization, 'paraview_runtime_path', side_effect=lambda p, bridge: 'windows:' + str(p)), \
+                    patch.object(visualization.subprocess, 'run', side_effect=launch), \
+                    patch.object(visualization, 'validate_visualization_images'):
+                result = visualization.run_visualization_job(root, 4000, None, {'mesh_only': True})
+            self.assertEqual(result['status'], 'complete', result['warnings'])
+            self.assertEqual(result['settings']['case_path'], str(root))
+            self.assertTrue(result['renderer']['windows_wsl_bridge'])
+
+    def test_wsl_path_conversion_preserves_spaces(self):
+        path = Path('case with spaces').resolve()
+        with patch.object(visualization.subprocess, 'check_output', return_value='C:\\case with spaces\n') as convert:
+            self.assertEqual(visualization.paraview_runtime_path(path, True), 'C:\\case with spaces')
+            convert.assert_called_once_with(['wslpath', '-w', str(path)], text=True)
+
+    def test_mesh_only_dispatch_does_not_read_flow_or_pressure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.json'
+            path.write_text(json.dumps(visualization.visualization_settings(tmp, 4000, None, {'mesh_only': True})))
+            with patch.object(visualization, 'pvs', MagicMock(), create=True), \
+                    patch.object(visualization, '_pvvis_mesh') as mesh, \
+                    patch.object(visualization, '_pvvis_volume') as volume, \
+                    patch.object(visualization, '_pvvis_surface') as surface, \
+                    patch.object(visualization, '_pvvis_pressure_units') as pressure:
+                visualization._pvvis_main(path)
+            mesh.assert_called_once()
+            volume.assert_not_called()
+            surface.assert_not_called()
+            pressure.assert_not_called()
+
+    def test_full_atlas_keeps_mesh_when_flow_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.json'
+            path.write_text(json.dumps(visualization.visualization_settings(tmp, 4000, None)))
+
+            def mesh(result, *_):
+                result['views'].append({'chapter': 'mesh', 'title': 'Mesh domain overview'})
+
+            with patch.object(visualization, 'pvs', MagicMock(), create=True), \
+                    patch.object(visualization, '_pvvis_mesh', side_effect=mesh), \
+                    patch.object(visualization, '_pvvis_volume', side_effect=ValueError('no flow fields')), \
+                    patch.object(visualization, '_pvvis_pressure_units', return_value=('Pa', 'Pressure')), \
+                    patch.object(visualization.traceback, 'print_exc'):
+                visualization._pvvis_main(path)
+            result = json.loads((Path(tmp) / 'result.json').read_text())
+            self.assertEqual(result['status'], 'partial')
+            self.assertEqual(result['views'][0]['chapter'], 'mesh')
+
+    def test_report_chapters_are_separate_and_mesh_only_filters_flow(self):
+        from reportlab.pdfgen import canvas
+        from pypdf import PdfReader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            visuals = root / 'report' / 'visuals'
+            visuals.mkdir(parents=True)
+            views = [{'title': title, 'caption': 'Example', 'image': 'missing.png'}
+                     for title in ('Flow slice - speed', 'Blade surface mesh (front)',
+                                   'Mesh section (xy)', 'Surface pressure')]
+            (visuals / 'manifest.json').write_text(json.dumps({
+                'status': 'complete', 'views': views, 'warnings': [],
+                'settings': {'report_max_views': 1}}))
+            for mesh_only in (True, False):
+                output = root / f'{mesh_only}.pdf'
+                pdf = canvas.Canvas(str(output))
+                visualization.append_visualization_report(pdf, root, mesh_only=mesh_only)
+                pdf.save()
+                content = '\n'.join(p.extract_text() for p in PdfReader(output).pages)
+                self.assertIn('Mesh - Geometry, Refinement and Near-Wall Layers', content)
+                self.assertEqual('Flow and Blade-Wall Diagnostics' in content, not mesh_only)
+                self.assertEqual('Acoustic Surface Diagnostics' in content, not mesh_only)
+
+    @unittest.skipUnless(os.environ.get('PARAVIEW_RENDER_TESTS') == '1', 'requires offscreen ParaView')
+    def test_real_mesh_only_atlas_without_fields_times_or_diameter(self):
+        from mesh_case_fixture import write_mesh_case
+        from createSimulationReport import create_simulation_report
+        from pypdf import PdfReader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'unnamed-case'
+            write_mesh_case(root)
+            manifest = visualization.run_visualization_job(root, 4000, None, {
+                'mesh_only': True, 'image_resolution': [1200, 800]})
+            self.assertNotEqual(manifest['status'], 'failed', manifest['warnings'])
+            self.assertGreaterEqual(len(manifest['views']), 20, manifest['warnings'])
+            self.assertEqual({v['chapter'] for v in manifest['views']}, {'mesh'})
+            self.assertFalse(any('Near-wall flow' in w for w in manifest['warnings']))
+            self.assertEqual(manifest['mesh_summary']['cells'], 736)
+            report = create_simulation_report(root, 4000, 'AMI', 'kOmegaSST', mesh_only=True, quiet=True)
+            pdf = PdfReader(report['output_pdf'])
+            self.assertEqual(sum(len(page.images) for page in pdf.pages), len(manifest['views']))
+            text = '\n'.join(page.extract_text() for page in pdf.pages)
+            self.assertIn('Mesh - Geometry, Refinement and Near-Wall Layers', text)
+            self.assertNotIn('Flow and Blade-Wall Diagnostics', text)
+
     def test_mesh_views_accept_zero_time_without_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / 'constant' / 'polyMesh').mkdir(parents=True)
@@ -21,6 +145,8 @@ class VisualizationTests(unittest.TestCase):
             reader.CellArrays.Available = []
             reader.TimestepValues = [0.0]
             reader.GetDataInformation.return_value.GetBounds.return_value = [-1, 1] * 3
+            reader.GetDataInformation.return_value.GetNumberOfCells.return_value = 10
+            reader.GetDataInformation.return_value.GetNumberOfPoints.return_value = 20
             pvs = MagicMock()
             pvs.OpenFOAMReader.return_value = reader
             type(pvs.Slice.return_value).SliceType = PropertyMock(return_value=MagicMock())
@@ -33,7 +159,7 @@ class VisualizationTests(unittest.TestCase):
             self.assertEqual(reader.SkipZeroTime, 0)
             self.assertEqual(reader.CellArrays, [])
             self.assertTrue(render.called)
-            self.assertTrue(all(call.args[5].startswith('Mesh section') for call in render.call_args_list))
+            self.assertTrue(all(call.args[5].startswith(('Mesh section', 'Mesh domain')) for call in render.call_args_list))
             self.assertEqual(wall.call_args.args[1], 0.0)
             self.assertEqual(result['warnings'], [])
 
@@ -139,8 +265,10 @@ else:
     raise AssertionError('Blank plot with scalar bar was accepted')
 '''
             (root / 'check.py').write_text(script, encoding='utf-8')
+            script_path = visualization.paraview_runtime_path(
+                root / 'check.py', visualization.running_in_wsl() and executable.lower().endswith('.exe'))
             run = subprocess.run([executable, '--disable-registry', '--force-offscreen-rendering',
-                                  str(root / 'check.py')], capture_output=True, text=True, timeout=120)
+                                  script_path], capture_output=True, text=True, timeout=120)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             result = json.loads((root / 'result.json').read_text())
             self.assertEqual(len(result['views']), 4)

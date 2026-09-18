@@ -51,7 +51,7 @@ def create_simulation_report(
         c.setFont("Helvetica", 11)
         c.drawString(50, A4[1] - 90, f"Case: {case_path.name}")
         c.drawString(50, A4[1] - 112, "Mesh-only run: meshing views at the initial mesh time.")
-        visualization_summary = append_visualization_report(c, case_path)
+        visualization_summary = append_visualization_report(c, case_path, mesh_only=True)
         c.save()
         if not quiet:
             print(f"Report created: {output_pdf}")

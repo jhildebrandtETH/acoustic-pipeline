@@ -19,17 +19,20 @@ DEFAULTS = {
 
 
 def read_controls(parameters):
-    from tools.cfmesh_pipeline import query
+    from tools.cfmesh_pipeline import query_entries
 
     path = Path(parameters) / "cfmeshPipelineDict"
     controls = {section: dict(values) for section, values in DEFAULTS.items()}
     # Older resumable cases predate this dictionary. An existing file must be complete.
     if not path.is_file():
         return controls
+    raw_values = query_entries(path, (
+        f"{section}/{key}" for section, values in controls.items() for key in values
+    ))
     for section, values in controls.items():
         for key, default in values.items():
             entry = f"{section}/{key}"
-            raw = query(path, entry).strip()
+            raw = raw_values[entry].strip()
             try:
                 if isinstance(default, bool):
                     if raw.lower() not in {"true", "yes", "on", "1", "false", "no", "off", "0"}:

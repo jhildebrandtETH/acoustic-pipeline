@@ -70,43 +70,47 @@ def openfoamSimulation(
             number_of_cores,
         )
 
-        import hashlib
-        import re
-        key = hashlib.sha256(str(simulation_working_directory.resolve()).encode()).hexdigest()[:10]
-        container_name = "cfmesh-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", simulation_name)[:80] + "-" + key
-        client = docker.from_env()
-        remove_stale_stopped_container(client, container_name, STATUS_CALLBACK)
+        def start_foundation():
+            nonlocal container
+            import hashlib
+            import re
+            key = hashlib.sha256(str(simulation_working_directory.resolve()).encode()).hexdigest()[:10]
+            container_name = "cfmesh-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", simulation_name)[:80] + "-" + key
+            client = docker.from_env()
+            remove_stale_stopped_container(client, container_name, STATUS_CALLBACK)
 
-        my_volumes = {
-            str(simulation_working_directory): {
-                "bind": "/simulation",
-                "mode": "rw",
-            },
-        }
+            my_volumes = {
+                str(simulation_working_directory): {
+                    "bind": "/simulation",
+                    "mode": "rw",
+                },
+            }
 
-        docker_user = None
-        if hasattr(os, "getuid") and hasattr(os, "getgid"):
-            docker_user = f"{os.getuid()}:{os.getgid()}"
+            docker_user = None
+            if hasattr(os, "getuid") and hasattr(os, "getgid"):
+                docker_user = f"{os.getuid()}:{os.getgid()}"
 
-        report_case_stage(
-            STATUS_CALLBACK,
-            "docker",
-            f"creating container | cores={number_of_cores} | "
-            f"mode={'MPI' if parallel_run else 'serial'}",
-        )
+            report_case_stage(
+                STATUS_CALLBACK,
+                "docker",
+                f"creating container | cores={number_of_cores} | "
+                f"mode={'MPI' if parallel_run else 'serial'}",
+            )
 
-        container = client.containers.run(
-            image="microfluidica/openfoam:13",
-            name=container_name,
-            volumes=my_volumes,
-            working_dir="/simulation",
-            command="bash",
-            detach=True,
-            tty=True,
-            stdin_open=True,
-            user=docker_user,
-            labels={"acoustic-pipeline-case": simulation_name},
-        )
+            container = client.containers.run(
+                image="microfluidica/openfoam:13",
+                name=container_name,
+                volumes=my_volumes,
+                working_dir="/simulation",
+                command="bash",
+                detach=True,
+                tty=True,
+                stdin_open=True,
+                user=docker_user,
+                labels={"acoustic-pipeline-case": simulation_name},
+            )
+
+            return container
 
         # ------------------------------------------------------------------
         # NEW CASE: mesh preparation
@@ -114,7 +118,7 @@ def openfoamSimulation(
         if not resume:
             from tools.cfmesh_pipeline import docker_run
             mesh_ok = cfmesh(
-                container, simulation_working_directory, number_of_cores,
+                start_foundation, simulation_working_directory, number_of_cores,
                 ALLOW_BAD_MESH, STATUS_CALLBACK, LIVE_OUTPUT,
             )
             if MESH_ONLY:
@@ -156,6 +160,7 @@ def openfoamSimulation(
         # RESUME CASE
         # ------------------------------------------------------------------
         else:
+            start_foundation()
             report_case_stage(STATUS_CALLBACK, "resume", "finding safe timestep")
             safe_time = get_safe_timestep(simulation_working_directory)
 

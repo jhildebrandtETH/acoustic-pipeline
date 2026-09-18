@@ -16,6 +16,7 @@ localRefinement
     }
     "rotaryRegion_.*" { additionalRefinementLevels $interfaceLevel; }
 }
+
 // Complete native cfMesh workflow: generate and refine propeller boundary layers.
 // For a no-layer comparison add: workflowControls { stopAfter edgeExtraction; }
 // cfMesh also inserts its automatic base layer on the rotor interface.

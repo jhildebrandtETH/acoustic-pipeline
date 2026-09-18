@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import shutil
 import sys
+import time
 
 from tools import emit_status, get_latest_timestep, update_parameter, find_source_stls
 from tools.preprocessing import prepare_case_directory
@@ -47,8 +48,13 @@ def preprocessing(
         ACOUSTIC_SURFACE = None
         ACOUSTIC_SPHERE_DIAMETER = None
 
+    copy_started = time.perf_counter()
     prepare_case_directory(
         core_template_directory, main_directory / "Parameters", target_directory
+    )
+    emit_status(
+        STATUS_CALLBACK, stage="preprocessing",
+        detail=f"template copied in {time.perf_counter() - copy_started:.2f}s; updating case settings",
     )
 
     if INIT_FROM_PREVIOUS:
@@ -120,6 +126,10 @@ def preprocessing(
     study = None
     if STUDY_PARAMETER_NAME is not None:
         study = (STUDY_PARAMETER_FILE, STUDY_PARAMETER_NAME, STUDY_PARAMETER)
+    emit_status(
+        STATUS_CALLBACK, stage="preprocessing",
+        detail="reading mesh settings and preparing geometry",
+    )
     prepare_geometry(
         target_directory,
         source,

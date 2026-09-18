@@ -103,6 +103,20 @@ The pipeline sources the appropriate OpenFOAM environment **inside each containe
 a host OpenFOAM installation is not required. Docker bind mounts expose the case
 and its `Parameters/` directory to the tools.
 
+The pipeline uses at most one active container per case at a time. Preparation
+uses one named native helper, which is removed when preparation ends. Meshing
+uses one native helper for both rotor and stator; it is removed before the
+Foundation container starts for mesh assembly, checks and solving. Startup checks
+use a separate helper that is removed before cases begin. Native helper names
+include the case and phase; individual dictionary reads use `docker exec`.
+Cleanup also runs on Python errors and Ctrl+C. Force-killing Python or shutting
+down Docker can leave a helper behind; helpers carry the
+`acoustic-pipeline-role=utility` label.
+
+Related parameter reads are batched and each native helper initializes its
+OpenFOAM environment once. Preprocessing reports the actual template-copy time,
+then switches its status to settings updates and geometry preparation.
+
 ### 5. Enable report visuals
 
 Install [ParaView](https://www.paraview.org/download/) on the simulation host,
@@ -114,7 +128,11 @@ export PARAVIEW_EXECUTABLE=/absolute/path/to/paraview/bin/pvpython
 "$PARAVIEW_EXECUTABLE" --version
 ```
 
-The pipeline otherwise searches `PATH` for `pvpython`, then `pvbatch`. Server
+The pipeline otherwise searches `PATH` for `pvpython`, then `pvbatch`. On WSL,
+if neither is available, it also discovers Windows ParaView installations under
+`/mnt/c/Program Files/ParaView*`. It translates case and script paths for the
+Windows renderer and records the selected executable in the manifest. WSL Windows
+interop must be enabled; native Linux ParaView remains preferred. Server
 rendering uses `--force-offscreen-rendering`; the ParaView build and host graphics
 libraries must support offscreen rendering. A desktop GUI session is not required
 with a suitable headless build. Rendering failures are recorded in
@@ -351,8 +369,14 @@ For a shorter rendering run, create `<case>/visualization.json` before postproce
 }
 ```
 
-The PDF selects up to `report_max_views` representative figures across quantities;
+The PDF selects up to `report_max_views` representative figures per atlas chapter;
 all rendered PNGs remain in the archive. Increase the limit to embed more views.
+The dedicated mesh chapter renders the initial mesh independently of solver fields:
+domain overviews, three orthogonal domain sections, rotor and wake refinement cuts,
+front/back/oblique blade surfaces, four radial blade sections and chord-end layer
+close-ups. `--mesh-only` includes only this atlas chapter. An unknown propeller
+diameter omits only the D-scaled cuts; domain and blade views still render. Missing
+patches or failed views are recorded in the coverage notes and rendering log.
 Magnitude fields listed in `log_fields` use a labelled logarithmic color scale;
 set this list to `[]` for linear scales throughout.
 

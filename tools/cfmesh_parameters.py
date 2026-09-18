@@ -3,7 +3,7 @@
 import math
 from pathlib import Path
 
-from tools.cfmesh_pipeline import optional, query
+from tools.cfmesh_pipeline import optional, query, query_entries
 
 
 REGIONS = (
@@ -45,16 +45,18 @@ def domain_bounds(parameters, radius):
     path = Path(parameters) / "cfmeshDomainDict"
     mode = optional(path, "boxSizing") or "absolute"  # Legacy case snapshots.
     if mode == "sphereRelative":
+        values = query_entries(path, ("lateralMargin", "inletMargin", "inletFraction"))
         settings = {
-            key: float(query(path, key))
+            key: float(values[key])
             for key in ("lateralMargin", "inletMargin", "inletFraction")
         }
         lower, upper = relative_box(
             radius, settings["lateralMargin"], settings["inletMargin"], settings["inletFraction"],
         )
     elif mode == "absolute":
+        values = query_entries(path, ("boxMin", "boxMax"))
         lower, upper = (
-            list(map(float, query(path, key).strip("()").split()))
+            list(map(float, values[key].strip("()").split()))
             for key in ("boxMin", "boxMax")
         )
         settings = {}
@@ -92,8 +94,9 @@ def resolution_settings(parameters):
     if base_text is not None:
         base = float(base_text)
         sizes = {"background": level_cell_size(base, 0)}
+        values = query_entries(path, (region + "Level" for region in REGIONS))
         for region in REGIONS:
-            raw = query(path, region + "Level")
+            raw = values[region + "Level"]
             try:
                 level = int(raw)
                 sizes[region] = level_cell_size(base, level)
@@ -103,8 +106,9 @@ def resolution_settings(parameters):
         mode = "levels"
     else:
         # Old snapshots keep their absolute sizes and their original mesh includes.
+        values = query_entries(path, (region + "CellSize" for region in ("background", *REGIONS)))
         sizes = {
-            region: float(query(path, region + "CellSize"))
+            region: float(values[region + "CellSize"])
             for region in ("background", *REGIONS)
         }
         if any(not math.isfinite(size) or size <= 0 for size in sizes.values()):

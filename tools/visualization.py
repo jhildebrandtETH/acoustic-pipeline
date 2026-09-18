@@ -85,8 +85,37 @@ def visualization_settings(case_path, rpm, acoustic_surface, overrides=None):
     return settings
 
 
+def running_in_wsl():
+    """Detect WSL without treating ordinary Linux hosts as Windows bridges."""
+    if os.name == "nt":
+        return False
+    try:
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+
+
+def windows_paraview_candidates():
+    roots = ([Path(os.environ.get("ProgramFiles", "C:/Program Files"))] if os.name == "nt"
+             else [Path("/mnt/c/Program Files")] if running_in_wsl() else [])
+    for root in roots:
+        for directory in sorted(root.glob("ParaView*"), reverse=True):
+            for name in ("pvpython.exe", "pvbatch.exe"):
+                candidate = directory / "bin" / name
+                if candidate.is_file():
+                    yield str(candidate)
+
+
+def paraview_runtime_path(path, windows_bridge=False):
+    """Translate WSL paths for a Windows renderer, leaving native paths alone."""
+    path = str(Path(path).resolve())
+    if windows_bridge:
+        return subprocess.check_output(["wslpath", "-w", path], text=True).strip()
+    return path
+
+
 def find_paraview_executable(configured=None):
-    """Use a native host ParaView Python; never import it into the pipeline env."""
+    """Prefer native ParaView; WSL can also use the installed Windows runtime."""
     explicit = configured or os.environ.get("PARAVIEW_EXECUTABLE")
     if explicit:
         resolved = shutil.which(str(explicit))
@@ -97,11 +126,8 @@ def find_paraview_executable(configured=None):
         candidate = shutil.which(name)
         if candidate:
             return candidate
-    if os.name == "nt":
-        for directory in sorted(Path(os.environ.get("ProgramFiles", "C:/Program Files")).glob("ParaView*"), reverse=True):
-            candidate = directory / "bin" / "pvpython.exe"
-            if candidate.is_file():
-                return str(candidate)
+    for candidate in windows_paraview_candidates():
+        return candidate
     raise FileNotFoundError("Install a headless-capable ParaView on the simulation host and set PARAVIEW_EXECUTABLE to pvpython or pvbatch.")
 
 
@@ -133,8 +159,11 @@ def run_visualization_job(case_path, rpm, acoustic_surface, config=None, status_
         _atomic_write_json(manifest_path, manifest)
         try:
             executable = find_paraview_executable(settings["executable"])
+            windows_bridge = running_in_wsl() and executable.lower().endswith(".exe")
+            runtime_settings = dict(settings, case_path=paraview_runtime_path(settings["case_path"], windows_bridge))
+            manifest["renderer"] = {"executable": executable, "windows_wsl_bridge": windows_bridge}
             settings_path = run_dir / "settings.json"
-            _atomic_write_json(settings_path, settings)
+            _atomic_write_json(settings_path, runtime_settings)
             # Only this named helper family enters ParaView's Python runtime.
             # No pipeline imports (pandas, torch, Docker, etc.) are required there.
             script = "import json, math, traceback, sys\nfrom pathlib import Path\nimport numpy as np\nfrom paraview import simple as pvs, servermanager\n\n"
@@ -146,10 +175,15 @@ def run_visualization_job(case_path, rpm, acoustic_surface, config=None, status_
             env = os.environ.copy()
             env["VTK_SMP_MAX_THREADS"] = str(settings["threads"])
             env["OMP_NUM_THREADS"] = str(settings["threads"])
-            emit_status(status_callback, stage="visualization", detail="rendering acoustic and flow diagnostics on server", progress=10.0)
+            if windows_bridge:
+                # WSL only forwards named Linux variables to Windows children.
+                env["WSLENV"] = ":".join(filter(None, [env.get("WSLENV", ""), "VTK_SMP_MAX_THREADS", "OMP_NUM_THREADS"]))
+            detail = "rendering mesh diagnostics on server" if settings["mesh_only"] else "rendering mesh, acoustic and flow diagnostics on server"
+            emit_status(status_callback, stage="visualization", detail=detail, progress=10.0)
             with (run_dir / "paraview.log").open("w", encoding="utf-8") as log:
                 process = subprocess.run(
-                    [executable, "--disable-registry", "--force-offscreen-rendering", str(script_path), str(settings_path)],
+                    [executable, "--disable-registry", "--force-offscreen-rendering",
+                     paraview_runtime_path(script_path, windows_bridge), paraview_runtime_path(settings_path, windows_bridge)],
                     stdout=log, stderr=subprocess.STDOUT, env=env, cwd=run_dir,
                     timeout=float(settings["timeout_seconds"]), check=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -234,7 +268,16 @@ def select_report_views(views, maximum=32):
     return [item for item in views if id(item) in identifiers]
 
 
-def append_visualization_report(c, case_path):
+def visualization_chapter(item):
+    """Accept archived manifests written before explicit chapter metadata."""
+    if "chapter" in item:
+        return item["chapter"]
+    if item["title"].startswith(("Mesh ", "Blade mesh", "Blade layer mesh", "Blade surface mesh")):
+        return "mesh"
+    return "flow" if item["title"].startswith(("Flow ", "Blade ", "Near-wall ", "Vortex ")) else "acoustic"
+
+
+def append_visualization_report(c, case_path, mesh_only=False):
     """Append a coverage page and one large, annotated landscape page per view."""
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle
@@ -249,6 +292,15 @@ def append_visualization_report(c, case_path):
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         manifest = {"status": "failed", "views": [], "warnings": [f"Unreadable visual manifest: {exc}"]}
+    mesh_only = mesh_only or manifest.get("settings", {}).get("mesh_only", False)
+    chapters = [("mesh", "Mesh - Geometry, Refinement and Near-Wall Layers")]
+    if not mesh_only:
+        chapters += [("acoustic", "Acoustic Surface Diagnostics"), ("flow", "Flow and Blade-Wall Diagnostics")]
+    selected_views = []
+    for key, _ in chapters:
+        selected_views.extend(select_report_views(
+            [item for item in manifest["views"] if visualization_chapter(item) == key],
+            manifest.get("settings", {}).get("report_max_views", 32)))
     w, h = landscape(A4)
     style = ParagraphStyle("atlas", fontName="Helvetica", fontSize=9, leading=12, textColor="#263746")
 
@@ -274,7 +326,7 @@ def append_visualization_report(c, case_path):
         c.drawRightString(w - 42, 19, f"Visual atlas | Page {c.getPageNumber()}")
 
     new_page("Scientific Visual Atlas - Coverage and Interpretation")
-    y = paragraph(f"Status: {manifest['status']} | Generated views: {len(manifest['views'])} | Report selection: up to {manifest.get('settings', {}).get('report_max_views', 32)} representative views", h - 63, 11)
+    y = paragraph(f"Status: {manifest['status']} | Generated views: {len(manifest['views'])} | Selected views: {len(selected_views)} | Up to {manifest.get('settings', {}).get('report_max_views', 32)} views per chapter", h - 63, 11)
     notes = [
         "These figures show saved CFD fields and acoustic-surface diagnostics. Hydrodynamic pressure, its fluctuations and vortex structures are not radiated sound or SPL. Use the FW-H observer spectrum for the acoustic prediction. Steady loading on rotating panels can still radiate tonal noise; low rotating-frame RMS does not imply low sound.",
         "Rotation axis: +y through the origin; lengths in metres. Rotor phase is omega*t modulo 360 degrees, relative to solver t=0. Signed y/D stations are shown on both sides of the rotor; identify the downstream side using axial velocity.",
@@ -282,7 +334,7 @@ def append_visualization_report(c, case_path):
         "Slice color ranges cover the displayed region and are fixed across the selected phases at each station. Different stations may use different ranges; compare their legends. Full displayed-region extrema remain in metadata. Labelled logarithmic magnitude scales clamp zero to the lowest displayed color without changing the underlying data. Cross-case comparison requires matching color_ranges in visualization.json. Derivative maps are limited by saved sample cadence.",
         "The PDF contains a representative selection; all generated views remain in the image archive. The manifest, rendering script, settings, extracted surface statistics and original-resolution PNGs are retained under report/visuals. No CFD fields or postprocessing data are deleted. A visualization recipe alone cannot recreate views after source data are removed.",
     ]
-    if manifest.get("settings", {}).get("mesh_only"):
+    if mesh_only:
         notes = [
             "Mesh-only run. Views show the initial volume mesh, blade surface, blade sections and layer close-ups.",
             "Rotation axis: +y through the origin; lengths in metres. Inspect refinement transitions and layer continuity alongside checkMesh results.",
@@ -300,8 +352,19 @@ def append_visualization_report(c, case_path):
         y = paragraph("Coverage note: " + str(warning), y)
 
     embedded = 0
-    selected_views = select_report_views(manifest["views"], manifest.get("settings", {}).get("report_max_views", 32))
+    current_chapter = None
     for item in selected_views:
+        chapter = visualization_chapter(item)
+        if chapter != current_chapter:
+            current_chapter = chapter
+            new_page("Scientific Visual Atlas - " + dict(chapters)[chapter])
+            y = paragraph(dict(chapters)[chapter], h - 70, 14)
+            if chapter == "mesh":
+                y = paragraph("Initial mesh: domain overview, orthogonal sections, rotor and wake refinement, blade surface panels, radial blade sections and magnified chord-end layers. Available views depend on mesh patches and geometry. These images require no solver fields.", y)
+                summary = manifest.get("mesh_summary", {})
+                if summary:
+                    y = paragraph(f"Volume cells: {summary.get('cells', 'n/a')} | Points: {summary.get('points', 'n/a')} | Mesh time: {summary.get('time_s', 0):g} s", y)
+                paragraph("Use checkMesh results for quantitative quality. Surface panels and cut-cell widths do not establish wall-normal layer thickness or y+. Lengths are in metres; rotor axis is +y through the origin.", y)
         new_page(item["title"])
         image_path = root / item["image"]
         # Manifest paths must stay in this case's visual archive.
@@ -555,13 +618,14 @@ def _pvvis_render(source, result, settings, run_dir, view, title, caption,
     pvs.Render(view)
     filename = f"view_{len(result['views']) + 1:04d}.png"
     pvs.SaveScreenshot(str(run_dir / filename), view, ImageResolution=settings["image_resolution"], TransparentBackground=0)
-    if field:
+    if field or edges:
         _pvvis_check_foreground(run_dir / filename)
     entry = {
         "title": title, "caption": caption, "image": f"{run_dir.name}/{filename}",
         "camera": camera if isinstance(camera, str) else "blade section", "bounds_m": bounds,
         "camera_position_m": list(view.CameraPosition), "camera_focal_point_m": list(view.CameraFocalPoint),
         "parallel_scale_m": float(view.CameraParallelScale),
+        "chapter": "mesh" if settings.get("mesh_only") else ("flow" if settings.get("_flow_chapter") else "acoustic"),
     }
     if field:
         entry.update(field=label, association=field[0], color_range=list(limits), data_range=data_range,
@@ -913,22 +977,25 @@ def _pvvis_blade_detail(base, wall, t, result, settings, run_dir, view, units):
                         pvs.Delete(arrows)
                         pvs.Delete(centers)
                         pvs.Delete(projected)
-                _pvvis_render(cropped, result, settings, run_dir, view, f"Blade mesh section ({station})",
-                              "Actual volume-cell intersections around the blade profile. Inspect layer continuity, growth and transitions; section widths are not wall-normal layer-thickness measurements.",
-                              camera=radial.tolist(), edges=True, time_s=t, overlays=[outline])
+                if settings.get("mesh_only"):
+                    _pvvis_render(cropped, result, settings, run_dir, view, f"Blade mesh section ({station})",
+                                  "Actual volume-cell intersections around the blade profile. Inspect layer continuity, growth and transitions; section widths are not wall-normal layer-thickness measurements.",
+                                  camera=radial.tolist(), edges=True, time_s=t, overlays=[outline])
                 # Two extrema along the local chord: do not guess which is the leading edge.
                 for side, index in (("chord end A", np.argmin(xyz @ tangent)), ("chord end B", np.argmax(xyz @ tangent))):
                     zoom_center = xyz[index]
                     zoom = _pvvis_crop(sliced, zoom_center, [span * .3] * 3)
                     try:
-                        _pvvis_render(zoom, result, settings, run_dir, view, f"Blade layer mesh - {side} ({station})",
-                                      "Magnified volume-cell section at a chord extremum. Inspect edge resolution, near-wall layers and refinement transitions. A/B label geometry, not an inferred leading/trailing edge.",
-                                      camera=radial.tolist(), edges=True, time_s=t)
-                        _pvvis_attempt(result, run_dir, f"Near-wall flow {station} {side}", lambda: _pvvis_render(
-                            zoom, result, settings, run_dir, view, f"Near-wall flow - {side} ({station})",
-                            caption + " Local color scale; cell edges expose the available resolution.",
-                            camera=radial.tolist(), field=("CELLS", "relative_speed", "Blade-relative speed [m/s]"),
-                            edges=True, time_s=t))
+                        if settings.get("mesh_only"):
+                            _pvvis_render(zoom, result, settings, run_dir, view, f"Blade layer mesh - {side} ({station})",
+                                          "Magnified volume-cell section at a chord extremum. Inspect edge resolution, near-wall layers and refinement transitions. A/B label geometry, not an inferred leading/trailing edge.",
+                                          camera=radial.tolist(), edges=True, time_s=t)
+                        else:
+                            _pvvis_attempt(result, run_dir, f"Near-wall flow {station} {side}", lambda: _pvvis_render(
+                                zoom, result, settings, run_dir, view, f"Near-wall flow - {side} ({station})",
+                                caption + " Local color scale; cell edges expose the available resolution.",
+                                camera=radial.tolist(), field=("CELLS", "relative_speed", "Blade-relative speed [m/s]"),
+                                edges=True, time_s=t))
                     finally:
                         pvs.Delete(zoom)
             finally:
@@ -941,7 +1008,81 @@ def _pvvis_blade_detail(base, wall, t, result, settings, run_dir, view, units):
         pvs.Delete(merged)
 
 
+def _pvvis_mesh(result, settings, run_dir, view):
+    """Render the initial mesh independently of flow fields and rotor diameter."""
+    case = Path(settings["case_path"])
+    if not (case / "constant" / "polyMesh").is_dir():
+        raise ValueError("Reconstructed constant/polyMesh unavailable for mesh chapter")
+    markers = sorted(case.glob("*.foam"))
+    marker = markers[0] if markers else case / "visualization.foam"
+    if not marker.exists():
+        marker.touch()
+    mesh_settings = dict(settings, mesh_only=True)
+    reader = pvs.OpenFOAMReader(FileName=str(marker))
+    try:
+        reader.CaseType = "Reconstructed Case"
+        reader.SkipZeroTime = 0
+        reader.Createcelltopointfiltereddata = 0
+        reader.UpdatePipelineInformation()
+        reader.MeshRegions = ["internalMesh"]
+        reader.CellArrays = []
+        # Always request the initial mesh, including constant-only cases.
+        t = 0.0
+        view.ViewTime = t
+        reader.UpdatePipeline(t)
+        info = reader.GetDataInformation()
+        if info.GetNumberOfCells() == 0:
+            raise ValueError("Initial volume mesh contains no readable cells")
+        bounds = list(info.GetBounds())
+        center = [(bounds[2*i] + bounds[2*i+1]) / 2 for i in range(3)]
+        result["mesh_summary"] = {"cells": info.GetNumberOfCells(),
+                                  "points": info.GetNumberOfPoints(), "bounds_m": bounds,
+                                  "time_s": t, "source": str(marker)}
+        for camera in ("oblique", "front"):
+            _pvvis_attempt(result, run_dir, f"Mesh domain {camera}", lambda: _pvvis_render(
+                reader, result, mesh_settings, run_dir, view, f"Mesh domain overview ({camera})",
+                "Initial volume mesh with native cell edges. Domain boundaries provide scale and context; interior refinement is shown in the following sections.",
+                camera=camera, edges=True, time_s=t))
+        cuts = [(camera, normal, center, f"domain {label}", None)
+                for camera, normal, label in (("xy", [0, 0, 1], "xy"),
+                                              ("yz", [1, 0, 0], "yz"),
+                                              ("front", [0, 1, 0], "xz"))]
+        diameter = settings.get("diameter_m")
+        if diameter:
+            cuts += [(camera, normal, [0, 0, 0], f"rotor {camera}", [1.15*diameter]*3)
+                     for camera, normal in (("xy", [0, 0, 1]), ("yz", [1, 0, 0]))]
+            cuts += [("front", [0, 1, 0], [0, station*diameter, 0], f"y/D={station:g}", [1.35*diameter]*3)
+                     for station in settings["wake_stations_D"]]
+        else:
+            result["warnings"].append("Propeller diameter unavailable: D-scaled mesh cuts omitted; domain sections and geometry-based blade details remain available.")
+        for camera, normal, origin, label, widths in cuts:
+            def section():
+                sliced = pvs.Slice(Input=reader)
+                cropped = None
+                try:
+                    sliced.Triangulatetheslice = 0
+                    sliced.SliceType.Normal = normal
+                    sliced.SliceType.Origin = origin
+                    if widths:
+                        cropped = _pvvis_crop(sliced, origin, widths)
+                    _pvvis_render(cropped if cropped is not None else sliced,
+                                  result, mesh_settings, run_dir, view, f"Mesh section ({label})",
+                                  "Initial volume-cell intersections. Inspect cell-size transitions, refinement coverage and continuity. Slice edges do not quantify mesh quality; consult checkMesh results.",
+                                  camera=camera, edges=True, time_s=t)
+                finally:
+                    if cropped is not None:
+                        pvs.Delete(cropped)
+                    pvs.Delete(sliced)
+            _pvvis_attempt(result, run_dir, f"Mesh section {label}", section)
+        _pvvis_attempt(result, run_dir, "Mesh blade surfaces and layers", lambda: _pvvis_wall(
+            marker, t, result, mesh_settings, run_dir, view, ("", ""), base=reader))
+    finally:
+        pvs.Delete(reader)
+
+
 def _pvvis_volume(result, settings, run_dir, view, units):
+    if settings.get("mesh_only"):
+        return _pvvis_mesh(result, settings, run_dir, view)
     case = Path(settings["case_path"])
     if not (case / "constant" / "polyMesh").is_dir():
         raise ValueError("Reconstructed constant/polyMesh unavailable; volume and blade-wall views withheld")
@@ -953,21 +1094,16 @@ def _pvvis_volume(result, settings, run_dir, view, units):
     reader = pvs.OpenFOAMReader(FileName=str(marker))
     reader.CaseType = "Reconstructed Case"
     reader.MeshRegions = ["internalMesh"]
-    mesh_only = settings.get("mesh_only", False)
-    reader.SkipZeroTime = 0 if mesh_only else 1
+    reader.SkipZeroTime = 1
     reader.Createcelltopointfiltereddata = 0
     reader.UpdatePipelineInformation()
     available = list(reader.CellArrays.Available)
     wanted = [name for name in ("p", "U", "k", "Q", "vorticity", "Co") if name in available]
     missing = [name for name in ("p", "U", "k", "Co") if name not in available]
-    if mesh_only:
-        wanted = []
-    if missing and not mesh_only:
+    if missing:
         result["warnings"].append(f"Volume fields unavailable (corresponding views omitted): {', '.join(missing)}")
     reader.CellArrays = wanted
-    times = [(float(t), None) for t in reader.TimestepValues if mesh_only or float(t) > 0]
-    if mesh_only:
-        times = [min(times)] if times else [(0.0, None)]
+    times = [(float(t), None) for t in reader.TimestepValues if float(t) > 0]
     if not times:
         pvs.Delete(reader)
         raise ValueError("No saved nonzero volume times available")
@@ -977,7 +1113,7 @@ def _pvvis_volume(result, settings, run_dir, view, units):
     if diameter is None:
         pvs.Delete(reader)
         raise ValueError("Cannot determine propeller diameter; set diameter_m in visualization.json")
-    if not mesh_only and len(selected) < settings["volume_phases"]:
+    if len(selected) < settings["volume_phases"]:
         result["warnings"].append(f"Only {len(selected)} distinct volume snapshots available for {settings['volume_phases']} requested phases")
     proxies = []
     base = reader
@@ -1031,7 +1167,7 @@ return velocity(data)
         fields += [("k", "Turbulent kinetic energy k [m^2/s^2]", False)]
     if "Co" in wanted:
         fields += [("Co", "Cell Courant number [-]", False)]
-    if not fields and not mesh_only:
+    if not fields:
         raise ValueError("No supported volume fields found")
     ranges_by_station = {}
     # Broad wake context plus rotor close-ups; all legends use these actual crops.
@@ -1093,11 +1229,6 @@ return velocity(data)
                             f"Plane {station}, laboratory frame; D={diameter:.6g} m. Inspect wake asymmetry, shear layers and rotor loading. Color range covers this cropped station across all selected phases; compare legends between stations." + note,
                             camera=camera, field=("CELLS", display_name, label), limits=limits,
                             time_s=t, diverging=diverging))
-                    if t == selected[-1][0]:
-                        _pvvis_attempt(result, run_dir, f"Mesh slice {station}", lambda: _pvvis_render(
-                            cropped, result, settings, run_dir, view, f"Mesh section ({station})",
-                            "Inspect refinement transitions and rotor-region cell structure. Slice edges show sectioned cells; they do not quantify mesh quality or prove adequate boundary-layer resolution.",
-                            camera=camera, edges=True, time_s=t))
                 finally:
                     if pressure is not None:
                         pvs.Delete(pressure)
@@ -1175,7 +1306,7 @@ def _pvvis_wall(marker, t, result, settings, run_dir, view, units, base=None):
                     wall, result, settings, run_dir, view, f"Blade wall - {name} ({camera})",
                     "Inspect local loading or wall-treatment coverage, especially blade tips and roots. Colors show native patch cell values; no surface smoothing is applied. Assess y+ against the chosen turbulence model and wall treatment.",
                     camera=camera, field=("CELLS", name, label), time_s=t))
-        for camera in ("front", "oblique"):
+        for camera in (("front", "back", "oblique") if mesh_only else ()):
             _pvvis_render(wall, result, settings, run_dir, view, f"Blade surface mesh ({camera})",
                           "Inspect blade surface panel density near edges, root and tip. This surface view cannot measure prism-layer thickness; consult mesh sections and checkMesh results.",
                           camera=camera, time_s=t, edges=True)
@@ -1212,13 +1343,15 @@ def _pvvis_main(settings_path):
         setattr(view.AxesGrid, axis + "TitleFontSize", round(settings["image_resolution"][0] * .014))
         setattr(view.AxesGrid, axis + "LabelFontSize", round(settings["image_resolution"][0] * .012))
         setattr(view.AxesGrid, axis + "AxisPrecision", 3)
-    units = _pvvis_pressure_units(Path(settings["case_path"]))
+    _pvvis_attempt(result, run_dir, "Mesh atlas", lambda: _pvvis_mesh(result, settings, run_dir, view))
+    units = ("", "") if settings.get("mesh_only") else _pvvis_pressure_units(Path(settings["case_path"]))
     result["pressure_units"] = {"unit": units[0], "label": units[1]}
     if not settings.get("mesh_only") and units[0] in {"units unverified", "unknown dimensions"}:
         result["warnings"].append("Pressure dimensions could not be verified; pressure figures explicitly retain unverified units")
     if not settings.get("mesh_only") and settings["acoustic_surface"] is not None:
         _pvvis_attempt(result, run_dir, "Acoustic-surface atlas", lambda: _pvvis_surface(result, settings, run_dir, view, units))
-    _pvvis_attempt(result, run_dir, "Volume atlas", lambda: _pvvis_volume(result, settings, run_dir, view, units))
+    if not settings.get("mesh_only"):
+        _pvvis_attempt(result, run_dir, "Volume atlas", lambda: _pvvis_volume(result, dict(settings, _flow_chapter=True), run_dir, view, units))
     result["resolved_diameter_m"] = settings["diameter_m"]
     result["status"] = "partial" if result["warnings"] else "complete"
     if not result["views"]:

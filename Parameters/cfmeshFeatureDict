@@ -9,21 +9,21 @@ groups (le te tip hub);
 // Thickness is in metres; 0 refines only cells intersected by the curves.
 le
 {
-    level 6;
-    refinementThickness 0.0005;
+    level 5;
+    refinementThickness 1e-30;//0.0001;
 }
 te
 {
-    level 6;
-    refinementThickness 0.0005;
+    level 5;
+    refinementThickness 1e-30;//0.0001;
 }
 tip
 {
-    level 6;
-    refinementThickness 0.0005;
+    level 5;
+    refinementThickness 1e-30;//0.0001;
 }
 hub
 {
-    level 6;
-    refinementThickness 0.0005;
+    level 5;
+    refinementThickness 1e-30; //0.00001;
 }

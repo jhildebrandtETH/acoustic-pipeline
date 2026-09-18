@@ -2,7 +2,7 @@
 // Levels pass directly to cfMesh as additionalRefinementLevels.
 // Nonnegative integer levels; level 0 is the background resolution.
 // Derived native cell sizes are in cfmeshSizes.cpp; edit inputs here for studies.
-baseCellSize 0.02;
+baseCellSize 0.025;
 propellerLevel 4;        // 0.000625 m
 interfaceLevel 2;        // 0.01 m, used on both interface sides
 rotaryRegionLevel 3;     // 0.005 m
@@ -17,7 +17,7 @@ propellerLayerThicknessRatio 1.1;
 propellerLayerAllowDiscontinuity 0;
 // Metres. 1e30 is effectively uncapped for this geometry; reduce for a cap.
 // This is an upper bound, not an exact first-layer height or total thickness.
-propellerMaxFirstLayerThickness 1e-4;
+propellerMaxFirstLayerThickness 1e30;
 
 // Native layer optimisation (whole rotor region, before layer subdivision).
 // Enable for a controlled comparison; does not prescribe total layer thickness.
