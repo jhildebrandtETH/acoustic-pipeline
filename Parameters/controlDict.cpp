@@ -3,8 +3,8 @@ startFrom latestTime;
 startTime 0;
 endTime 0.3;
 maxDeltaT 1e-5;
-writeInterval 200;
-purgeWrite 200;
+writeInterval 1;
+purgeWrite 10;
 adjustTimeStep yes;
 maxCo 5;
 

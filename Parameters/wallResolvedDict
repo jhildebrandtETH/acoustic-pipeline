@@ -1,0 +1,9 @@
+// Native fixedValue omega boundary for wall-resolved SST and DES.
+// Units: 1/s. Set for the actual mesh and constant/transportProperties viscosity.
+// SST wall asymptote: omega = 60*nu/(beta1*y1^2), beta1 = 0.075.
+// y1 is wall-to-first-cell-centre distance, NOT full first-layer thickness.
+// Example: nu = 1.5e-5 m2/s, y1 = 2.5e-5 m gives 1.92e7 1/s.
+// This example is not inferred from the mesh or the cfMesh layer thickness cap.
+// A nonuniform List<scalar> can replace uniform for varying wall distances;
+// entries must follow the propeller patch face order before decomposition.
+omegaWallValue uniform 1.92e7;

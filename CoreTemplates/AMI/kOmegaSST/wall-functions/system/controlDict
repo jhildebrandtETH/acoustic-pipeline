@@ -142,15 +142,38 @@ functions
         writeControl    writeTime;
     }
 
-    CourantNumber
+    CoField
     {
-        type                CourantNo;
-        libs                ("libfieldFunctionObjects.so");
+        type            CourantNo;
+        libs            ("libfieldFunctionObjects.so");
 
-        executeControl      timeStep;
-        executeInterval     1;
+        executeControl  timeStep;
+        executeInterval 1;
 
-        writeControl        writeTime;
+        // Don't need to dump the whole Co field every timestep
+        writeControl    writeTime;
+    }
+
+    CoMax
+    {
+        type            volFieldValue;
+        libs            ("libfieldFunctionObjects.so");
+
+        cellZone        all;
+        operation       max;
+
+        fields
+        (
+            Co
+        );
+
+        writeLocation   true;
+        writeFields     false;
+
+        writeControl    timeStep;
+        writeInterval   1;
+
+        log             true;
     }
 
     Umax

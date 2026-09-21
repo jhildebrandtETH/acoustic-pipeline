@@ -29,6 +29,11 @@ class SolverOptionsTests(unittest.TestCase):
                     self.assertEqual((template / 'constant/dynamicMeshDict').exists(), mode == 'AMI')
                     self.assertEqual((template / 'constant/MRFProperties').exists(), mode == 'MRF')
                     fields = '\n'.join(p.read_text() for p in (template / '0').iterdir() if p.is_file())
+                    # NCC reads every initial field, before a turbulence model exists.
+                    # Wall treatment must not trigger runtime boundary compilation.
+                    self.assertNotIn('codedFixedValue', fields)
+                    self.assertNotIn('#codeStream', fields)
+                    self.assertNotIn('#calc', fields)
                     if walls == 'no':
                         self.assertNotIn('WallFunction', fields)
                     else:

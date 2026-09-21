@@ -1,5 +1,6 @@
 import os
 import math
+import re
 import threading
 from pathlib import Path
 
@@ -73,7 +74,6 @@ def openfoamSimulation(
         def start_foundation():
             nonlocal container
             import hashlib
-            import re
             key = hashlib.sha256(str(simulation_working_directory.resolve()).encode()).hexdigest()[:10]
             container_name = "cfmesh-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", simulation_name)[:80] + "-" + key
             client = docker.from_env()
