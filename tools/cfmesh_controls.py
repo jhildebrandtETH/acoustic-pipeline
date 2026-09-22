@@ -19,13 +19,21 @@ DEFAULTS = {
 
 
 def read_controls(parameters):
-    from tools.cfmesh_pipeline import query_entries
+    from tools.cfmesh_pipeline import query_entries, optional
 
     path = Path(parameters) / "cfmeshPipelineDict"
     controls = {section: dict(values) for section, values in DEFAULTS.items()}
     # Older resumable cases predate this dictionary. An existing file must be complete.
     if not path.is_file():
         return controls
+    regions = ("rotor", "stator")
+    regional = [optional(path, f"improveMeshQuality/{role}") is not None for role in regions]
+    if any(regional):
+        if not all(regional):
+            raise ValueError(f"{path}: improveMeshQuality requires both rotor and stator blocks")
+        defaults = controls.pop("improveMeshQuality")
+        for role in regions:
+            controls[f"improveMeshQuality/{role}"] = dict(defaults)
     raw_values = query_entries(path, (
         f"{section}/{key}" for section, values in controls.items() for key in values
     ))
@@ -51,11 +59,19 @@ def read_controls(parameters):
                 values[key] = value
             except ValueError as exc:
                 raise ValueError(f"{path}: invalid {entry}: {raw!r} ({exc})") from exc
+    if all(regional):
+        controls["improveMeshQuality"] = {
+            role: controls.pop(f"improveMeshQuality/{role}") for role in regions
+        }
     return controls
 
 
-def improvement_command(controls):
+def improvement_command(controls, role):
+    if role not in ("rotor", "stator"):
+        raise ValueError(f"Unknown mesh region: {role}")
     settings = controls["improveMeshQuality"]
+    # Flat dictionaries from older cases apply the same settings to both regions.
+    settings = settings.get(role, settings)
     if not settings["enabled"]:
         return None
     command = ["improveMeshQuality"]

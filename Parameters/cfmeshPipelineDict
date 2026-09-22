@@ -1,12 +1,23 @@
 FoamFile { version 2.0; format ascii; class dictionary; object cfmeshPipelineDict; }
 // Pipeline controls, not native cartesianMesh entries. See cfmeshGuide.md.
-// Defaults preserve the existing meshing and acceptance behavior.
+// Extra mesh improvement applies to both rotor and stator in this variant.
 improveMeshQuality
 {
-    enabled true;          // Applies after workflowControls/stopAfter edgeExtraction.
-    nLoops 2;
-    nIterations 20;
-    nSurfaceIterations 0;
+    // Each pass runs after its region's cartesianMesh, including completed layers.
+    rotor
+    {
+        enabled true;
+        nLoops 6;
+        nIterations 20;
+        nSurfaceIterations 0;
+    }
+    stator
+    {
+        enabled true;
+        nLoops 2;
+        nIterations 20;
+        nSurfaceIterations 0;
+    }
 }
 interfaceProjection
 {

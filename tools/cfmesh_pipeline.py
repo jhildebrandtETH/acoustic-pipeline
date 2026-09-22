@@ -549,9 +549,11 @@ def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
                 log_text = (region_directory / "log.cartesianMesh").read_text()
                 if "Stopping after step edgeExtraction" not in log_text:
                     raise RuntimeError("Mesher did not honour the required no-layer stop")
-                command = improvement_command(controls)
-                if command:
-                    native_mesh_run(case, role, command, cores, callback, live)
+            # Apply the optional extra pass to both complete (layered) meshes
+            # and meshes stopped before layer generation.
+            command = improvement_command(controls, role)
+            if command:
+                native_mesh_run(case, role, command, cores, callback, live)
     # Native meshing has finished and its helper is gone before Foundation starts.
     if callable(container):
         container = container()

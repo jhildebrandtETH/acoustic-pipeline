@@ -187,8 +187,19 @@ Legacy order metadata for layer presets is no longer applied; when remeshing
 an old order, review its case dictionaries. Existing solved meshes are unchanged.
 
 `cfmeshPipelineDict/improveMeshQuality` controls the additional improvement
-command after an `edgeExtraction` stop. It does not control the full mesher's
-internal optimization. Set `enabled false` to skip that additional command.
+command for both rotor and stator after `cartesianMesh` finishes. For a full
+workflow this runs after boundary layers have been generated; it also runs
+after an `edgeExtraction` stop. It does not control the full mesher's internal
+optimization. The `rotor` and `stator` subdictionaries each have independent
+`enabled`, `nLoops`, `nIterations`, and `nSurfaceIterations` settings. Set
+`improveMeshQuality/rotor/enabled false` to skip only the rotor pass, or
+`improveMeshQuality/stator/enabled false` to skip only the stator pass.
+Both region blocks must be complete. Older case dictionaries with the four
+settings directly inside `improveMeshQuality` remain supported and apply those
+shared settings to both regions. If region blocks exist, they take precedence
+over any old shared settings. Cases without this dictionary retain shared defaults.
+Additional smoothing can change layer spacing: compare layer thickness and
+spacing as well as mesh-quality results when evaluating this variant.
 
 Cylinder projection is separately switchable. Its allowed movement is
 `movementLimitFactor * radius * (1 - cos(pi / cylinderSegments)) + absoluteTolerance`.
@@ -212,7 +223,8 @@ Example study options (add to your usual single-STL, single-RPM mesh-only run):
 ```
 
 For the additional quality-improvement iterations, use `--study-file
-cfmeshPipelineDict --study-parameter improveMeshQuality/nIterations`.
+cfmeshPipelineDict --study-parameter improveMeshQuality/rotor/nIterations`
+(or `improveMeshQuality/stator/nIterations` for the stator).
 
 Inspect each case's `cfmesh/rotor/system/meshDict` and
 `cfmesh/stator/system/meshDict` for the expanded native inputs.

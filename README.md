@@ -1,5 +1,18 @@
 # Acoustic Pipeline
 
+This **postlayer-improvement variant** runs the optional `improveMeshQuality`
+pass on both rotor and stator after `cartesianMesh`, including after the rotor's
+boundary layers are generated. Configure independent `rotor` and `stator` blocks
+inside `improveMeshQuality` in `Parameters/cfmeshPipelineDict`; each has its own
+`enabled`, `nLoops`, `nIterations`, and `nSurfaceIterations`. Both start with
+the previous settings (true, 2, 20, 0). Older flat dictionaries still apply shared
+settings to both regions. Existing case snapshots use their own
+`Parameters/cfmeshPipelineDict`, so edit those to change an existing case's controls
+before remeshing. Launch the pipeline from this
+folder and use a new output/order directory for comparison runs. This folder
+contains a separate source copy; the original pipeline is unchanged. Git history
+and local run outputs are not included.
+
 **From propeller geometry to aerodynamic results and aeroacoustic predictions.**
 
 The pipeline prepares OpenFOAM cases, meshes the rotor and surrounding fluid with
