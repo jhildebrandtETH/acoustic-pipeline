@@ -19,6 +19,8 @@ Top-level stage files show the workflow. Put supporting functions here.
 | `cfmesh_parameters.py` | Sphere-relative domain bounds and level-based cell sizes |
 | `geometry.py` | STL reader and validation |
 | `reporting.py` | Result summaries and report plots |
+| `mesh_quality.py` | checkMesh defect counts, relative quality index and dedicated PDF quality pages |
+| `layer_thickness.py` | Initial-mesh first-cell normal depths, area-weighted histogram, min/mean/max and PDF page |
 | `visualization.py` | ParaView configuration, rendering and atlas helpers |
 | `terminal_propeller.py` | Dashboard animation |
 

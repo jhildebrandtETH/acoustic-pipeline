@@ -113,11 +113,12 @@ def preflight(args):
 def _preflight(args):
     safe_path(args.sim_dir)
     native_preflight()
+    # Initialise file-only plotting on the main thread for BOTH mesh and solve
+    # orders, before scheduler workers can create figures.
+    from tools.plotting import pyplot
+
     # Load native acoustic libraries before long-running worker threads start.
     if not args.mesh_only:
-        import matplotlib
-
-        matplotlib.use("Agg")
         import postprocessing
     import docker
 

@@ -69,6 +69,7 @@ def postprocessing(
         SIMULATION_WORKING_DIRECTORY,
         RPM_COUNT,
         STATUS_CALLBACK=STATUS_CALLBACK,
+        config={"mesh_only": False},
     )
 
     emit_status(

@@ -112,6 +112,30 @@ class VisualizationTests(unittest.TestCase):
                 self.assertIn('Mesh - Geometry, Refinement and Near-Wall Layers', content)
                 self.assertEqual('Flow and Blade-Wall Diagnostics' in content, not mesh_only)
                 self.assertEqual('Acoustic Surface Diagnostics' in content, not mesh_only)
+                if not mesh_only:
+                    self.assertLess(content.index('Mesh - Geometry, Refinement and Near-Wall Layers'),
+                                    content.index('Flow and Blade-Wall Diagnostics'))
+                    self.assertLess(content.index('Flow and Blade-Wall Diagnostics'),
+                                    content.index('Acoustic Surface Diagnostics'))
+
+    def test_explicit_solve_report_does_not_silently_become_mesh_only(self):
+        from reportlab.pdfgen import canvas
+        from pypdf import PdfReader
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            visuals = root/'report/visuals'
+            visuals.mkdir(parents=True)
+            (visuals/'manifest.json').write_text(json.dumps({
+                'status': 'complete', 'settings': {'mesh_only': True}, 'warnings': [],
+                'views': [{'chapter': chapter, 'title': title, 'caption': '', 'image': 'missing.png'}
+                          for chapter, title in [('flow', 'Solver velocity'), ('mesh', 'Mesh overview')]]}))
+            pdf = canvas.Canvas(str(root/'report.pdf'))
+            visualization.append_visualization_report(pdf, root, mesh_only=False)
+            pdf.save()
+            text = '\n'.join(p.extract_text() for p in PdfReader(root/'report.pdf').pages)
+            self.assertIn('Saved atlas is mesh-only', text)
+            self.assertIn('Status: partial', text)
+            self.assertLess(text.index('Mesh overview'), text.index('Solver velocity'))
 
     @unittest.skipUnless(os.environ.get('PARAVIEW_RENDER_TESTS') == '1', 'requires offscreen ParaView')
     def test_real_mesh_only_atlas_without_fields_times_or_diameter(self):
@@ -131,7 +155,7 @@ class VisualizationTests(unittest.TestCase):
             self.assertEqual(manifest['mesh_summary']['cells'], 736)
             report = create_simulation_report(root, 4000, 'AMI', 'kOmegaSST', mesh_only=True, quiet=True)
             pdf = PdfReader(report['output_pdf'])
-            self.assertEqual(sum(len(page.images) for page in pdf.pages), len(manifest['views']))
+            self.assertEqual(sum(len(page.images) for page in pdf.pages), len(manifest['views']) + 1)
             text = '\n'.join(page.extract_text() for page in pdf.pages)
             self.assertIn('Mesh - Geometry, Refinement and Near-Wall Layers', text)
             self.assertNotIn('Flow and Blade-Wall Diagnostics', text)
@@ -195,6 +219,37 @@ class VisualizationTests(unittest.TestCase):
             self.assertEqual(settings['report_max_views'], 32)
             with self.assertRaises(ValueError):
                 visualization.visualization_settings(tmp, 4000, None, {'log_fields': ['p']})
+
+    def test_solve_postprocessing_overrides_saved_mesh_only_setting(self):
+        import postprocessing as module
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp)/'visualization.json').write_text('{"mesh_only": true}')
+            for aero_only in (True, False):
+                with self.subTest(aerodynamics_only=aero_only), \
+                        patch.object(module, 'run_visualization') as render, \
+                        patch.object(module, 'create_simulation_report'), \
+                        patch.object(module, 'merge_postprocessing_dat_files'), \
+                        patch.dict(sys.modules, {'acoustic_propagation': MagicMock()}):
+                    module.postprocessing('impermeable', tmp, 4000, 'AMI', 'kOmegaSST', AERODYNAMICS_ONLY=aero_only)
+                settings = visualization.visualization_settings(tmp, 4000, None, render.call_args.kwargs['config'])
+                self.assertFalse(settings['mesh_only'])
+
+    def test_solve_dispatch_generates_mesh_and_flow_and_optional_acoustics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for acoustic in (None, 'impermeable'):
+                settings = Path(tmp)/'settings.json'
+                settings.write_text(json.dumps(visualization.visualization_settings(tmp, 4000, acoustic)))
+                with patch.object(visualization, 'pvs', MagicMock(), create=True), \
+                        patch.object(visualization, '_pvvis_mesh') as mesh, \
+                        patch.object(visualization, '_pvvis_volume') as flow, \
+                        patch.object(visualization, '_pvvis_surface') as surface, \
+                        patch.object(visualization, '_pvvis_pressure_units', return_value=('Pa', 'Pressure')):
+                    visualization._pvvis_main(settings)
+                mesh.assert_called_once()
+                flow.assert_called_once()
+                self.assertFalse(flow.call_args.args[1]['mesh_only'])
+                self.assertEqual(surface.call_count, int(acoustic is not None))
 
     def test_report_selection_keeps_distinct_quantities_and_latest_time(self):
         views = [{'title': f'Flow slice - {field} ({station})', 'time_s': t}

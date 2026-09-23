@@ -277,7 +277,7 @@ def visualization_chapter(item):
     return "flow" if item["title"].startswith(("Flow ", "Blade ", "Near-wall ", "Vortex ")) else "acoustic"
 
 
-def append_visualization_report(c, case_path, mesh_only=False):
+def append_visualization_report(c, case_path, mesh_only=None):
     """Append a coverage page and one large, annotated landscape page per view."""
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle
@@ -292,10 +292,16 @@ def append_visualization_report(c, case_path, mesh_only=False):
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         manifest = {"status": "failed", "views": [], "warnings": [f"Unreadable visual manifest: {exc}"]}
-    mesh_only = mesh_only or manifest.get("settings", {}).get("mesh_only", False)
+    if mesh_only is None:
+        mesh_only = manifest.get("settings", {}).get("mesh_only", False)
+    elif not mesh_only and manifest.get("settings", {}).get("mesh_only", False):
+        manifest.setdefault("warnings", []).append(
+            "Saved atlas is mesh-only: flow/acoustic views are unavailable. Rerun normal solve postprocessing to generate them.")
+        if manifest.get("status") == "complete":
+            manifest["status"] = "partial"
     chapters = [("mesh", "Mesh - Geometry, Refinement and Near-Wall Layers")]
     if not mesh_only:
-        chapters += [("acoustic", "Acoustic Surface Diagnostics"), ("flow", "Flow and Blade-Wall Diagnostics")]
+        chapters += [("flow", "Flow and Blade-Wall Diagnostics"), ("acoustic", "Acoustic Surface Diagnostics")]
     selected_views = []
     for key, _ in chapters:
         selected_views.extend(select_report_views(
@@ -1348,10 +1354,10 @@ def _pvvis_main(settings_path):
     result["pressure_units"] = {"unit": units[0], "label": units[1]}
     if not settings.get("mesh_only") and units[0] in {"units unverified", "unknown dimensions"}:
         result["warnings"].append("Pressure dimensions could not be verified; pressure figures explicitly retain unverified units")
-    if not settings.get("mesh_only") and settings["acoustic_surface"] is not None:
-        _pvvis_attempt(result, run_dir, "Acoustic-surface atlas", lambda: _pvvis_surface(result, settings, run_dir, view, units))
     if not settings.get("mesh_only"):
         _pvvis_attempt(result, run_dir, "Volume atlas", lambda: _pvvis_volume(result, dict(settings, _flow_chapter=True), run_dir, view, units))
+    if not settings.get("mesh_only") and settings["acoustic_surface"] is not None:
+        _pvvis_attempt(result, run_dir, "Acoustic-surface atlas", lambda: _pvvis_surface(result, settings, run_dir, view, units))
     result["resolved_diameter_m"] = settings["diameter_m"]
     result["status"] = "partial" if result["warnings"] else "complete"
     if not result["views"]:

@@ -1,7 +1,7 @@
 import json
 import math
 
-import matplotlib.pyplot as plt
+from tools.plotting import pyplot as plt
 import torch
 
 from acousticSolver.src.foamacoustics import F1ASolver

@@ -10,6 +10,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.colors import green, red
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+from tools.mesh_quality import read_mesh_quality, append_mesh_quality_report
+from tools.layer_thickness import create_thickness_report_data, append_thickness_report
 
 from tools import (
     append_visualization_report,
@@ -43,6 +45,11 @@ def create_simulation_report(
     report_dir = case_path / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    mesh_info = read_mesh_information(case_path)
+    mesh_element_types = read_mesh_element_types(case_path)
+    mesh_quality = read_mesh_quality(case_path, mesh_info)
+    layer_thickness = create_thickness_report_data(case_path)
+
     if mesh_only:
         output_pdf = Path(output_pdf) if output_pdf else report_dir / "simulation_report.pdf"
         c = canvas.Canvas(str(output_pdf), pagesize=A4)
@@ -51,11 +58,38 @@ def create_simulation_report(
         c.setFont("Helvetica", 11)
         c.drawString(50, A4[1] - 90, f"Case: {case_path.name}")
         c.drawString(50, A4[1] - 112, "Mesh-only run: meshing views at the initial mesh time.")
+        y = A4[1] - 154
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(50, y, "Mesh Information - checkMesh")
+        c.setFont("Helvetica", 11)
+        for label, key in [("Status", "status"), ("Cells", "cells"), ("Faces", "faces"),
+                           ("Points", "points"), ("Boundary patches", "boundary_patches"),
+                           ("Max aspect ratio", "max_aspect_ratio"), ("Max skewness", "max_skewness"),
+                           ("Max non-orthogonality", "max_non_orthogonality")]:
+            y -= 23
+            value = mesh_info.get(key)
+            c.drawString(50, y, f"{label}: {value if value is not None else 'Not reported'}")
+        y -= 38
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(50, y, "Mesh Element Types")
+        c.setFont("Helvetica", 11)
+        for label, count in mesh_element_types.items():
+            if count:
+                y -= 22
+                share = f" ({100 * count / mesh_info['cells']:.2f}%)" if mesh_info['cells'] else ""
+                c.drawString(50, y, f"{label}: {count:,}{share}")
+        if not any(mesh_element_types.values()):
+            c.drawString(50, y - 22, "Not reported")
+        append_mesh_quality_report(c, mesh_info, mesh_quality)
+        append_thickness_report(c, layer_thickness)
         visualization_summary = append_visualization_report(c, case_path, mesh_only=True)
         c.save()
         if not quiet:
             print(f"Report created: {output_pdf}")
         return {"case_path": str(case_path), "output_pdf": str(output_pdf),
+                "mesh_info": mesh_info, "mesh_element_types": mesh_element_types,
+                "mesh_quality": mesh_quality,
+                "layer_thickness": layer_thickness,
                 "visualization": visualization_summary}
 
     force_file = case_path / "postProcessing" / "forcesBlades" / "merged_forces.dat"
@@ -68,8 +102,6 @@ def create_simulation_report(
         control_dict_file,
     )
 
-    mesh_info = read_mesh_information(case_path)
-    mesh_element_types = read_mesh_element_types(case_path)
     mesh_element_plot = create_mesh_element_plot(mesh_element_types, report_dir)
 
     yplus_plot, yplus_stats = create_yplus_distribution_plot(
@@ -308,6 +340,8 @@ def create_simulation_report(
     c.drawString(50, y, f"Last 1-rev power around y-axis: {last_rev_power_mean:.6f} W")
 
 
+    append_mesh_quality_report(c, mesh_info, mesh_quality)
+    append_thickness_report(c, layer_thickness)
     c.showPage()
 
     # -----------------------------
@@ -563,7 +597,7 @@ def create_simulation_report(
                 c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
                 c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
 
-    visualization_summary = append_visualization_report(c, case_path)
+    visualization_summary = append_visualization_report(c, case_path, mesh_only=False)
     c.save()
 
     if not quiet:
@@ -577,6 +611,8 @@ def create_simulation_report(
         "simulated_time_s": latest_time,
         "effective_revolutions": eff_revs,
         "mesh_info": mesh_info,
+        "mesh_quality": mesh_quality,
+        "layer_thickness": layer_thickness,
         "mesh_element_types": mesh_element_types,
         "yplus_plot_path": str(yplus_plot) if yplus_plot is not None else None,
         "acoustic_plot": str(acoustic_plot) if acoustic_plot.is_file() else None,

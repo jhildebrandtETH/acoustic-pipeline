@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import re
 from pathlib import Path
+from .mesh_quality import latest_mesh_log
+from .plotting import pyplot as plt
 
 def create_reference_geometry_vtk_series(
     source_directory: Path,
@@ -68,7 +70,6 @@ def create_reference_geometry_vtk_series(
 
 
 def create_yplus_distribution_plot(case_path, report_dir, patch_name="cubeWall"):
-    import matplotlib.pyplot as plt
 
 
     def get_latest_time_dir(case_path):
@@ -238,12 +239,12 @@ def read_mesh_element_types(case_path):
     if not log_checkmesh.exists():
         return element_types
 
-    text = log_checkmesh.read_text(encoding="utf-8", errors="ignore")
+    text = latest_mesh_log(case_path)
 
     patterns = {
         "hexahedra": r"hexahedra:\s*([0-9]+)",
         "prisms": r"prisms:\s*([0-9]+)",
-        "wedges": r"wedges:\s*([0-9]+)",
+        "wedges": r"(?m)^\s*wedges:\s*([0-9]+)",
         "pyramids": r"pyramids:\s*([0-9]+)",
         "tet wedges": r"tet wedges:\s*([0-9]+)",
         "tetrahedra": r"tetrahedra:\s*([0-9]+)",
@@ -259,7 +260,6 @@ def read_mesh_element_types(case_path):
 
 
 def create_mesh_element_plot(element_types, report_dir):
-    import matplotlib.pyplot as plt
 
     nonzero = {
         key: value
@@ -321,9 +321,10 @@ def read_mesh_information(case_path):
         mesh_info["status"] = "log.checkMesh not found"
         return mesh_info
 
-    text = log_checkmesh.read_text(encoding="utf-8", errors="ignore")
+    text = latest_mesh_log(case_path)
 
-    mesh_info["mesh_ok"] = "Mesh OK" in text
+    endings = list(re.finditer(r"Mesh OK\.?|Failed\s+\d+\s+mesh checks?", text))
+    mesh_info["mesh_ok"] = bool(endings and endings[-1][0].startswith("Mesh OK"))
     mesh_info["status"] = "Mesh OK" if mesh_info["mesh_ok"] else "Mesh check failed / not confirmed"
 
     patterns = {
@@ -334,9 +335,13 @@ def read_mesh_information(case_path):
         "max_aspect_ratio": r"Max aspect ratio\s*=\s*([0-9.eE+-]+)",
         "max_skewness": r"Max skewness\s*=\s*([0-9.eE+-]+)",
         "max_non_orthogonality": r"Mesh non-orthogonality Max:\s*([0-9.eE+-]+)",
+        "mean_non_orthogonality": r"Mesh non-orthogonality Max:[^\n]*average:\s*([0-9.eE+-]+)",
+        "min_volume": r"Min volume\s*=\s*([0-9.eE+-]+)",
+        "min_determinant": r"Cell determinant[^\n]*minimum:\s*([0-9.eE+-]+)",
     }
 
     for key, pattern in patterns.items():
+        pattern = pattern.replace("[0-9.eE+-]+", r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
         match = re.search(pattern, text)
         if match:
             value = match.group(1)
@@ -497,7 +502,6 @@ def compute_thrust_stability_history(times, thrusts, rev_time):
 
 
 def create_force_plots(times, thrusts, report_dir, rev_time, thrust_convergence):
-    import matplotlib.pyplot as plt
 
     force_plot = report_dir / "force_plot.png"
     conv_plot = report_dir / "force_convergence.png"
@@ -609,7 +613,6 @@ def create_force_plots(times, thrusts, report_dir, rev_time, thrust_convergence)
 
 
 def create_moments_plots(times, moments, report_dir, rev_time):
-    import matplotlib.pyplot as plt
 
     moments_plot = report_dir / "moments_plot.png"
 
@@ -754,7 +757,6 @@ def evaluate_residual_slopes(df, rev_time, latest_time):
 
 
 def create_residual_plots(residual_file, report_dir, rev_time, latest_time):
-    import matplotlib.pyplot as plt
 
     residual_plot = report_dir / "residuals.png"
 
