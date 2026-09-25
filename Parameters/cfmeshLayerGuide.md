@@ -7,15 +7,14 @@ histogram. The entire `propeller` patch is measured, including the hub; these
 statistics therefore differ slightly from blade-only investigation results.
 Measurements are regenerated with each report and saved as JSON and per-face
 CSV under `report/mesh_first_layer_thickness.*`.
-
-`Parameters/meshReport.json` selects the patch and optional target band in mm.
-New case snapshots inherit the supplied 1–2 mm target; old cases without this
-file still receive the histogram but have no inferred target band. Set
-`target_thickness_mm` to `null` to omit the band. This is a reporting target,
-not a cfMesh control. Full first-cell height is measured along the wall normal;
-it is not wall-to-cell-centre distance or total stack thickness. Coverage and
-excluded faces are shown. Missing, binary or unsupported meshes receive an
-explicit unavailable page; ASCII and gzip-compressed ASCII are supported.
+`Parameters/meshReport.json` selects the patch and an optional target band in mm.
+The supplied target is `null`: a geometric mesh-only run cannot establish an
+appropriate wall-normal target without fluid properties and a solved y+ field.
+Set a case-specific band only when it follows from the intended wall treatment.
+Full first-cell height is measured along the wall normal; it is not
+wall-to-cell-centre distance or total stack thickness. Coverage and excluded
+faces are shown. Missing, binary or unsupported meshes receive an explicit
+unavailable page; ASCII and gzip-compressed ASCII are supported.
 
 Mesh-only reports include only the dedicated mesh atlas. Normal solve reports
 include the mesh atlas first, then the solver/flow atlas, followed by acoustic
@@ -27,33 +26,26 @@ Layer settings come from `cfmeshRotorDict` / `cfmeshStatorDict` and the values i
 `cfmeshCommon.cpp`. There is no separate layer-generation pipeline stage or CLI
 layer preset. The stator stops before native layer generation by default.
 
-## Measured 1–2 mm first-cell configuration (10x7E, 23 September 2026)
+## Supervisor reference configuration (10x7E, 25 September 2026)
 
-The current `cfmeshCommon.cpp` uses `baseCellSize 0.028`,
-`propellerLayerCount 1` and `layerOptimise 0`. All four feature groups retain
-level 4; propeller surface refinement retains level 3. The native untangling
-and the separate four-loop rotor `improveMeshQuality` pass remain enabled.
-The growth ratio and first-layer cap do not control subdivision when there is
-only one native layer.
+The supplied configuration uses `baseCellSize 0.022`, `propellerLevel 4`,
+`propellerLayerCount 3`, `propellerLayerThicknessRatio 1.3` and
+`layerOptimise 0`. The saved supervisor case contains 1,245,656 cells with nominal
+1.375 mm propeller cells and 2.75 mm rotor/interface/inner-cylinder cells.
+No new production mesh was run when adopting these settings.
 
-A complete rotor/stator comparison mesh measured 1.266 mm area-weighted mean
-first-cell height over the blades (radius >20 mm), with a 1.301 mm median and
-85.8% of blade area in the 1–2 mm interval. The 10th/90th percentiles were
-0.868/1.582 mm. The original case measured 0.338 mm mean with two layers.
-These are full wall-normal cell heights, not wall-to-cell-centre distances,
-and do not establish the resulting y+ without another flow solve.
+The complete propeller patch measured 0.379 mm area-weighted mean first-cell
+thickness (0.0836 mm minimum, 0.809 mm maximum) with 100% measurement coverage.
+These are full wall-normal cell heights. They do not demonstrate y+ or prove
+wall-resolved suitability; inspect the solved yPlus field before relying on
+the `--wall-functions no` model.
 
-The larger base size also coarsens every region: nominal propeller cells are
-3.5 mm, feature cells 1.75 mm, and level-2 regions 7 mm. Domain dimensions and
-the 2 mm surface refinement-band width stay the same. This is a measured
-configuration for this propeller, not a universal thickness guarantee or a
-mesh-convergence result. The complete mesh passes the standard post-coupling
-check and interface coverage checks; the extended pre-coupling check still
-flags 447 concave cells. Its saved overall mesh-quality status is therefore
-false. No flow solve was run.
-
-See [the trial report](../investigations/layer-height/RESULTS.md) for the
-comparison cases, geometry tradeoffs, measurements and exact output location.
+Both normal OpenFOAM checks report `Mesh OK`; maximum non-orthogonality is 64.62,
+average non-orthogonality 3.17, maximum skewness 3.29 and maximum aspect ratio
+9.24. NCC minimum coverage is 0.99690/0.99823 and average coverage exceeds
+0.999999 on both sides. The extended diagnostic still reports 70
+low-quality face decompositions and 2,482 concave cells; these remain
+visible in `log.checkMesh.extended` and `extended_mesh_diagnostics_ok`.
 
 ## Why five layers can occupy the same thickness as three
 

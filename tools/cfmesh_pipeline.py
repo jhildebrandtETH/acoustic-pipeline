@@ -631,10 +631,17 @@ def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
         container,
         case,
         ["checkMesh", "-allGeometry", "-allTopology"],
-        "log.checkMesh",
+        "log.checkMesh.extended",
         callback,
         live,
     )
+    extended_log = (case / "log.checkMesh.extended").read_text()
+    extended_ok = "Mesh OK." in extended_log and not re.search(
+        r"Failed\s+\d+\s+mesh checks", extended_log
+    )
+    # Match the supervisor workflow: retain extended diagnostics separately,
+    # and use standard checks for acceptance before and after NCC coupling.
+    docker_run(container, case, ["checkMesh"], "log.checkMesh", callback, live)
     log_text = (case / "log.checkMesh").read_text()
     if not re.search(r"Number of regions:\s*2\b", log_text):
         raise ValueError("Expected two disconnected fluid regions before NCC coupling")
@@ -650,6 +657,7 @@ def run_mesh(container, case, cores, allow_bad, callback=None, live=False):
         json.dumps(
             dict(
                 mesh_quality_ok=quality_ok,
+                extended_mesh_diagnostics_ok=extended_ok,
                 allow_bad_mesh=allow_bad,
                 rotor_cells=rotor_cell_count,
                 patches=patches,

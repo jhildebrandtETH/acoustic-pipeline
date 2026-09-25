@@ -31,22 +31,22 @@ assembly are part of the pipeline geometry contract.
 Without a permeable acoustic surface, the refinement sphere factor still sizes
 the domain, even if generated refinements are disabled.
 
-With the supplied `lateralMargin 0.02`, `inletMargin 0.02` and `inletFraction 0.30`:
+With the supplied `lateralMargin 0.1`, `inletMargin 0.1` and `inletFraction 0.30`:
 
 ```text
-boxMin = (-1.02R, -2.38R, -1.02R)
-boxMax = (+1.02R, +1.02R, +1.02R)
+boxMin = (-1.1R, -2.5666667R, -1.1R)
+boxMax = (+1.1R, +1.1R, +1.1R)
 ```
 
-The 2% margin is measured against sphere radius, on each side. The propeller
+The 10% margin is measured against sphere radius, on each side. The propeller
 plane and sphere centre stay at Y=0; +Y is the inlet, -Y is the outlet.
-The total axial length is 3.40R: 30% upstream and 70% downstream, measured from
-the propeller plane. The box centre is at Y=-0.68R. In general, inlet distance
+The total axial length is 3.6666667R: 30% upstream and 70% downstream, measured from
+the propeller plane. The box centre is at Y=-0.7333333R. In general, inlet distance
 is `R*(1+inletMargin)` and outlet distance is `inletDistance*(1-inletFraction)/inletFraction`.
 
-For a 12-inch (0.3048 m) measured span and factor 2.5, R=0.381 m, giving
-`boxMin (-0.38862 -0.90678 -0.38862)` and
-`boxMax (0.38862 0.38862 0.38862)` in metres.
+For a 10-inch (0.254 m) measured span and factor 2.5, R=0.3175 m, giving
+`boxMin (-0.34925 -0.8149167 -0.34925)` and
+`boxMax (0.34925 0.34925 0.34925)` in metres.
 The bounds grow with the propeller or sphere factor; the previous 308 mm
 sphere-containment limit no longer applies. Rotor axial clearance is still
 controlled independently by `rotorHalfLength`, and STL/rotor fit checks remain.
@@ -69,22 +69,22 @@ cfMesh still receives native physical cell sizes, so actual local cells depend
 on its refinement, surface fitting and layer operations. Overlapping refinement
 requests can make a region finer than its individual requested level.
 
-The default base remains 0.02 m:
+The supplied APC 10x7E configuration uses a 0.022 m base. The supervisor's
+reference 4000 RPM AMI case contains 1,245,656 cells:
 
 | Input | Level | Requested size |
 | --- | --- | --- |
-| Background | 0 | 20 mm |
-| `propellerLevel` | 5 | 0.625 mm |
-| `interfaceLevel` | 1 | 10 mm |
-| `rotaryRegionLevel` | 2 | 5 mm |
-| `innerCylinderLevel` | 2 | 5 mm |
-| `outerCylinderLevel` | 1 | 10 mm |
-| `acousticSphereLevel` | 0 | 20 mm |
+| Background | 0 | 22 mm |
+| `propellerLevel` | 4 | 1.375 mm |
+| `interfaceLevel` | 3 | 2.75 mm |
+| `rotaryRegionLevel` | 3 | 2.75 mm |
+| `innerCylinderLevel` | 3 | 2.75 mm |
+| `outerCylinderLevel` | 2 | 5.5 mm |
+| `acousticSphereLevel` | 0 | 22 mm |
 
-These integer levels replace the previous arbitrary sizes (blade 0.5 mm,
-interface/outer 12.5 mm, rotor/inner 6.25 mm, sphere 25 mm). This changes the
-requested mesh resolution; it is not an identical-mesh conversion.
-Layer settings and the 2 mm blade refinement thickness remain independent.
+Cell count is geometry- and domain-dependent; 1.25 million is a saved reference result,
+not a general guarantee. Layer settings and the 8 mm blade refinement-band
+width remain independent.
 Change `baseCellSize` to scale every requested size, or a single level to refine
 one region. Increasing propeller dimensions does not automatically coarsen the
 base cell size. Old case snapshots containing absolute cell sizes remain readable.
@@ -102,6 +102,11 @@ Each geometry report records the base size, requested levels and physical sizes.
 ## Native mesher settings
 
 ### Explicit feature curves
+
+The supplied preset uses `enabled false` to reproduce the supervisor's actual
+empty feature dictionary: its four OBJ files were missing. Level-5 settings
+remain available for an explicit feature study, but enabling them with existing
+feature files changes the reference configuration.
 
 Place a `FEATURES` folder next to your order's `STL` folder:
 
@@ -205,8 +210,13 @@ Cylinder projection is separately switchable. Its allowed movement is
 `movementLimitFactor * radius * (1 - cos(pi / cylinderSegments)) + absoluteTolerance`.
 Acceptance entries are fractions between 0 and 1. They determine whether a mesh
 is accepted; changing them does not improve the mesh. Volume and coverage checks
-still apply when projection is disabled. `--allow-bad-mesh` bypasses failed
-checkMesh quality results, but does not bypass volume or interface coverage checks.
+still apply when projection is disabled.
+
+The diagnostic `checkMesh -allGeometry -allTopology` output is saved in
+`log.checkMesh.extended` and recorded as `extended_mesh_diagnostics_ok`. Acceptance
+uses the normal solver-facing `log.checkMesh` before NCC and
+`log.checkMesh.NCC` afterward. `--allow-bad-mesh` bypasses failed standard checks
+only; it does not bypass volume or interface coverage checks.
 
 ## Reproducible thesis runs
 

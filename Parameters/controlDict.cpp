@@ -8,5 +8,5 @@ purgeWrite 10;
 adjustTimeStep yes;
 maxCo 5;
 
-impermeableEnabled yes;
+impermeableEnabled no;
 permeableEnabled no;

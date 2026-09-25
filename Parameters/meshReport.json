@@ -1,4 +1,4 @@
 {
   "patch": "propeller",
-  "target_thickness_mm": [1.0, 2.0]
+  "target_thickness_mm": null
 }
