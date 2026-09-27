@@ -466,6 +466,23 @@ def native_mesh_run(case, role, command, cores, callback, live):
 def docker_run(container, case, command, log_name, callback, live, relative="."):
     from tools import safe_exec, report_case_stage
 
+    from tools.mesh_point_format import normalize_point_signs
+
+    def normalize_points(mesh_case):
+        points = mesh_case / "constant/polyMesh/points"
+        if points.is_file():
+            repaired = normalize_point_signs(points)
+            if repaired:
+                report_case_stage(callback, command[0],
+                                  f"Normalized positive coordinate signs in {repaired} points; "
+                                  f"original and audit saved beside {points}")
+
+    # Each Foundation reader receives canonical ASCII scalar tokens. Check
+    # writers too: both createPatch and mergeMeshes outputs have exhibited this.
+    normalize_points(Path(case) / relative)
+    if command[0] == "mergeMeshes":
+        normalize_points(Path(case) / "cfmesh/rotor")
+
     prefix = f"cd {shlex.quote('/simulation/'+relative)} && "
     cmd = "source /opt/openfoam13/etc/bashrc && set -o pipefail && " + prefix
     cmd += shlex.join(command) + " 2>&1 | tee " + shlex.quote("/simulation/" + log_name)
@@ -478,6 +495,8 @@ def docker_run(container, case, command, log_name, callback, live, relative=".")
         status_callback=callback,
     ):
         raise RuntimeError(f"{command[0]} failed; see {case/log_name}")
+    if command[0] in {"createPatch", "mergeMeshes", "createNonConformalCouples"}:
+        normalize_points(Path(case) / relative)
 
 
 def strip_header(path):

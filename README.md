@@ -304,6 +304,25 @@ and stator controls. For detailed mesh setup and studies, see the
 Inspect `log.cfmesh`, `log.checkMesh`, `log.checkMesh.NCC`, `log.pimpleFoam`,
 `cfmesh/mesh-status.json`, and `cfmesh/ncc-status.json` for diagnostics. Reports
 include mesh quality and first-layer thickness analysis where data is available.
+Both mesh-only and simulation reports (AMI and MRF) also include a **Mesh Volume
+Distribution** page calculated from the assembled initial `constant/polyMesh`.
+It shows cell-count and occupied-volume shares in logarithmic volume bins, a
+cumulative cell distribution, percentiles, and the shares below 1%, 0.1%, and
+0.01% of the median positive cell volume. These relative cutoffs help identify
+tiny-cell tails; they are diagnostic guides, not mesh-quality pass/fail limits.
+Nonpositive and nonfinite volumes are counted separately. ASCII meshes (including
+gzip files) are supported; missing or unsupported meshes produce an explicit
+unavailable page. Raw per-cell volumes and statistics are regenerated in
+`report/mesh_cell_volumes.csv` and `report/mesh_volume_distribution.json`.
+Reports also include a **Mesh and Solver Settings** overview, with continuation
+pages when needed. It records saved rotor/stator meshing controls, geometry and
+resolution, improvement/acceptance settings, time stepping, solver tolerances,
+coupling, numerical schemes, fluid properties and rotation. Case-local includes
+and ordinary references are resolved without executing expressions. Missing or
+unsupported settings are identified explicitly. The full snapshot and source
+SHA-256 hashes are saved in `report/mesh_solver_settings.json`; this records the
+case files at report time, not a history of runtime edits. Mesh-only reports label
+solver settings as configured rather than evidence that the solver ran.
 Review force histories, residuals, Courant numbers, and y+; successful execution
 alone does not establish convergence or mesh independence.
 

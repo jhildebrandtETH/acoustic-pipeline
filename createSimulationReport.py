@@ -11,6 +11,8 @@ from reportlab.lib.colors import green, red
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from tools.mesh_quality import read_mesh_quality, append_mesh_quality_report
+from tools.mesh_volumes import create_volume_report_data, append_volume_report
+from tools.settings_report import create_settings_report_data, append_settings_report
 from tools.layer_thickness import create_thickness_report_data, append_thickness_report
 
 from tools import (
@@ -49,6 +51,8 @@ def create_simulation_report(
     mesh_element_types = read_mesh_element_types(case_path)
     mesh_quality = read_mesh_quality(case_path, mesh_info)
     layer_thickness = create_thickness_report_data(case_path)
+    mesh_volumes = create_volume_report_data(case_path)
+    settings = create_settings_report_data(case_path, rpm, mode, turbulence_model, mesh_only)
 
     if mesh_only:
         output_pdf = Path(output_pdf) if output_pdf else report_dir / "simulation_report.pdf"
@@ -81,6 +85,8 @@ def create_simulation_report(
         if not any(mesh_element_types.values()):
             c.drawString(50, y - 22, "Not reported")
         append_mesh_quality_report(c, mesh_info, mesh_quality)
+        append_settings_report(c, settings)
+        append_volume_report(c, mesh_volumes)
         append_thickness_report(c, layer_thickness)
         visualization_summary = append_visualization_report(c, case_path, mesh_only=True)
         c.save()
@@ -89,6 +95,8 @@ def create_simulation_report(
         return {"case_path": str(case_path), "output_pdf": str(output_pdf),
                 "mesh_info": mesh_info, "mesh_element_types": mesh_element_types,
                 "mesh_quality": mesh_quality,
+                "mesh_volumes": mesh_volumes,
+                "settings": settings,
                 "layer_thickness": layer_thickness,
                 "visualization": visualization_summary}
 
@@ -341,6 +349,8 @@ def create_simulation_report(
 
 
     append_mesh_quality_report(c, mesh_info, mesh_quality)
+    append_settings_report(c, settings)
+    append_volume_report(c, mesh_volumes)
     append_thickness_report(c, layer_thickness)
     c.showPage()
 
@@ -612,6 +622,8 @@ def create_simulation_report(
         "effective_revolutions": eff_revs,
         "mesh_info": mesh_info,
         "mesh_quality": mesh_quality,
+        "mesh_volumes": mesh_volumes,
+        "settings": settings,
         "layer_thickness": layer_thickness,
         "mesh_element_types": mesh_element_types,
         "yplus_plot_path": str(yplus_plot) if yplus_plot is not None else None,

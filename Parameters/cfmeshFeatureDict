@@ -5,7 +5,7 @@ FoamFile { version 2.0; format ascii; class dictionary; object cfmeshFeatureDict
 // Match the supervisor's effective mesh: all four OBJ inputs were missing,
 // so its generated edgeMeshRefinement was empty. Disable explicitly to keep
 // that behaviour even when an order contains matching feature files.
-enabled true;
+enabled false;
 groups (le te tip hub);
 //groups (te tip);
 
@@ -13,21 +13,21 @@ groups (le te tip hub);
 // Thickness is in metres; 0 refines only cells intersected by the curves.
 le
 {
-    level 5;
-    refinementThickness 0.0005;//0.0001;
+    level 6;
+    refinementThickness 0.0001;//0.0001;
 }
 te
 {
-    level 5;
-    refinementThickness 0.0005;//0.0001;
+    level 6;
+    refinementThickness 0.0001;//0.0001;
 }
 tip
 {
-    level 5;
-    refinementThickness 0.0005;//0.0001;
+    level 6;
+    refinementThickness 0.0001;//0.0001;
 }
 hub
 {
-    level 5;
-    refinementThickness 0.0005; //0.00001;
+    level 6;
+    refinementThickness 0.0001; //0.00001;
 }
