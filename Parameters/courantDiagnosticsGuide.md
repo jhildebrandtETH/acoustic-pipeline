@@ -1,5 +1,31 @@
 # Diagnosing Courant-limited cells
 
+The normal simulation PDF includes a **Cell Courant Number Distribution** page
+from the latest reconstructed snapshot. It shows cell shares by Co and the share
+above each Co value, plus counts that would exceed maxCo at 1x, 2x, 5x and 10x
+the saved timestep if fluxes and mesh stayed unchanged. Without a configured
+maxCo, the snapshot maximum is explicitly used as a comparison reference.
+The page exports `report/courant_distribution.json`, `courant_distribution.png`
+and `cell_courant_numbers.csv`. It reports unavailable data rather than using an
+older snapshot or inferring a distribution from log extrema. Mesh-only reports
+do not include this page.
+
+The same page compares the cell-volume distribution of the 1,000 highest-Co
+cells with all mesh cells, using matching cell IDs and the saved snapshot mesh
+(including inherited topology and moved points). Each group is normalized to
+100%, so a high-Co population in the larger-volume bins is easy to spot.
+Smaller volumes indicate finer cells, not necessarily a named refinement zone.
+Meshes with fewer than 1,000 cells include all cells; ties at the cutoff are
+resolved by ascending cell ID. The figure and selected cell IDs, Co and volumes
+are exported as `highest_courant_cell_volumes.png` and
+`highest_courant_cell_volumes.csv` in `report/`. Missing or invalid geometry
+disables only this comparison, leaving the Courant distribution available.
+
+A small high-Co population suggests localized restrictions, but even one cell
+can constrain a global timestep. A broad population indicates many cells would
+exceed the comparison limit. Neither proves a mesh defect: compare local fluxes,
+cell geometry and intended refinement, and check other saved times for peaks.
+
 `diagnoseCourant.py` analyses an existing, reconstructed simulation snapshot. It
 does not run or stop the solver, change settings, or modify mesh/solution files.
 Outputs go in a new `postProcessing/courantDiagnostics/<timestamp>` directory.

@@ -9,7 +9,7 @@ from .layer_thickness import _read_list
 from .plotting import pyplot as plt
 
 
-def measure_cell_volumes(mesh):
+def measure_cell_volumes(mesh, mesh_files=None):
     """Signed volumes of the assembled ASCII (optionally gzip) polyMesh.
 
     Face-centre triangle fans form oriented tetrahedra about a local reference
@@ -17,21 +17,22 @@ def measure_cell_volumes(mesh):
     avoid cancellation when tiny cells are far from the coordinate origin.
     """
     mesh = Path(mesh)
-    npoints, text = _read_list(mesh / 'points')
+    mesh_files = mesh_files or {}
+    npoints, text = _read_list(mesh_files.get('points', mesh / 'points'))
     points = np.fromstring(text.replace('(', ' ').replace(')', ' '), sep=' ')
     if points.size != 3 * npoints or not np.isfinite(points).all():
         raise ValueError('Invalid mesh points.')
     points = points.reshape(-1, 3)
-    nfaces, text = _read_list(mesh / 'faces')
+    nfaces, text = _read_list(mesh_files.get('faces', mesh / 'faces'))
     sizes = np.array([int(v) for v in re.findall(r'(\d+)\s*\(', text)], dtype=np.int64)
     vertices = np.fromstring(re.sub(r'\d+\s*\(', ' ', text).replace(')', ' '), sep=' ', dtype=np.int64)
     if (len(sizes) != nfaces or sizes.sum() != len(vertices) or np.any(sizes < 3)
             or np.any(vertices < 0) or np.any(vertices >= npoints)):
         raise ValueError('Invalid mesh faces.')
     offsets = np.r_[0, np.cumsum(sizes)]
-    nowner, text = _read_list(mesh / 'owner')
+    nowner, text = _read_list(mesh_files.get('owner', mesh / 'owner'))
     owner = np.fromstring(text.strip(), sep=' ', dtype=np.int64)
-    nneighbour, text = _read_list(mesh / 'neighbour')
+    nneighbour, text = _read_list(mesh_files.get('neighbour', mesh / 'neighbour'))
     neighbour = np.fromstring(text.strip(), sep=' ', dtype=np.int64)
     if (nowner != nfaces or len(owner) != nfaces or len(neighbour) != nneighbour
             or nneighbour > nfaces or not nfaces or np.any(owner < 0)

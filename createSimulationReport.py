@@ -12,6 +12,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from tools.mesh_quality import read_mesh_quality, append_mesh_quality_report
 from tools.mesh_volumes import create_volume_report_data, append_volume_report
+from tools.courant_distribution import create_courant_report_data, append_courant_report
 from tools.settings_report import create_settings_report_data, append_settings_report
 from tools.layer_thickness import create_thickness_report_data, append_thickness_report
 
@@ -104,10 +105,15 @@ def create_simulation_report(
     residual_file = case_path / "postProcessing" / "residuals" / "merged_residuals.dat"
     log_file = case_path / "log.pimpleFoam"
     control_dict_file = case_path / "system" / "controlDict.cpp"
+    if not control_dict_file.is_file():
+        control_dict_file = case_path / "Parameters" / "controlDict.cpp"
 
     timestep_courant_info = read_openfoam_timestep_and_courant_statistics(
         log_file,
         control_dict_file,
+    )
+    courant_distribution = create_courant_report_data(
+        case_path, timestep_courant_info['configured_max_co'],
     )
 
     mesh_element_plot = create_mesh_element_plot(mesh_element_types, report_dir)
@@ -352,6 +358,7 @@ def create_simulation_report(
     append_settings_report(c, settings)
     append_volume_report(c, mesh_volumes)
     append_thickness_report(c, layer_thickness)
+    append_courant_report(c, courant_distribution)
     c.showPage()
 
     # -----------------------------
@@ -643,6 +650,7 @@ def create_simulation_report(
         "thrust_convergence_window_end_s": thrust_convergence["window_end_s"],
         "thrust_convergence_n_samples": thrust_convergence["n_samples"],
         "timestep_courant_info": timestep_courant_info,
+        "courant_distribution": courant_distribution,
         "execution_time_s": exec_time,
         "clock_time_s": clock_time,
         "pdf_path": str(output_pdf),

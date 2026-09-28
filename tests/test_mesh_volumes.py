@@ -83,6 +83,11 @@ class MeshVolumeTests(unittest.TestCase):
                 text = '\n'.join(page.extract_text() for page in PdfReader(
                     result.get('output_pdf', result.get('pdf_path'))).pages)
                 self.assertIn('Mesh Volume Distribution', text)
+                if mesh_only:
+                    self.assertNotIn('Cell Courant Number Distribution', text)
+                else:
+                    self.assertIn('Cell Courant Number Distribution', text)
+                    self.assertEqual(result['courant_distribution']['status'], 'unavailable')
                 self.assertIn('Mesh and Solver Settings', text)
                 self.assertIn('Report arguments', text)
                 self.assertIn('736 cells', text)
