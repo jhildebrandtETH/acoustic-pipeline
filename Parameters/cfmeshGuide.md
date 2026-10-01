@@ -65,7 +65,7 @@ The resolved bounds are saved in `Parameters/cfmeshDomain.generated` and
 
 Every requested cell size is `baseCellSize / 2^level`. Levels must be nonnegative
 integers: raising a level by one halves the requested size in each direction.
-cfMesh still receives native physical cell sizes, so actual local cells depend
+cfMesh receives native `additionalRefinementLevels` entries, so actual local cells depend
 on its refinement, surface fitting and layer operations. Overlapping refinement
 requests can make a region finer than its individual requested level.
 
@@ -75,7 +75,8 @@ reference 4000 RPM AMI case contains 1,245,656 cells:
 | Input | Level | Requested size |
 | --- | --- | --- |
 | Background | 0 | 22 mm |
-| `propellerLevel` | 4 | 1.375 mm |
+| `propellerLevel` (outer band) | 5 | 0.6875 mm |
+| `propellerNearLevel` (inner band) | 7 | 0.171875 mm |
 | `interfaceLevel` | 3 | 2.75 mm |
 | `rotaryRegionLevel` | 3 | 2.75 mm |
 | `innerCylinderLevel` | 3 | 2.75 mm |
@@ -83,8 +84,8 @@ reference 4000 RPM AMI case contains 1,245,656 cells:
 | `acousticSphereLevel` | 0 | 22 mm |
 
 Cell count is geometry- and domain-dependent; 1.25 million is a saved reference result,
-not a general guarantee. Layer settings and the 8 mm blade refinement-band
-width remain independent.
+not a general guarantee. The current two-band defaults differ from that reference.
+Layer settings and refinement distances remain independent.
 Change `baseCellSize` to scale every requested size, or a single level to refine
 one region. Increasing propeller dimensions does not automatically coarsen the
 base cell size. Old case snapshots containing absolute cell sizes remain readable.
@@ -98,6 +99,32 @@ For a blade resolution study use:
 ```
 
 Each geometry report records the base size, requested levels and physical sizes.
+
+For a second, thin propeller band, edit `propellerNearLevel` and
+`propellerNearRefinementThickness` (metres) in `cfmeshCommon.cpp`. The native
+rotor dictionary applies these through `surfaceMeshRefinement` using the
+scaled propeller STL. The level is relative to the background; the finest
+overlapping request wins. Older case snapshots
+without these inputs retain their original single band.
+
+The inner distance is `propellerNearRefinementThickness 0.00008` (0.08 mm),
+and the outer distance is `propellerRefinementThickness 0.003` (3 mm).
+Both are measured from the same wall, not consecutively from each band edge.
+The outer distance must exceed the inner distance, and the inner level must
+be at least the outer level. The pipeline validates these conditions.
+
+Keep the outer band in `localRefinement/propeller` and the inner band in
+`surfaceMeshRefinement/propellerNear`. These execute in separate native passes.
+Do not move both requests into coincident `surfaceMeshRefinement` entries:
+cfMesh can propagate their maximum thickness at the finer level.
+Refinement transitions have finite cell widths, so extremely narrow outer
+bands can still be masked by inner refinement. The former 0.5 mm outer band
+showed no change between levels 4 and 5 with the level-7 inner band.
+The wider default preserves both bands for an outer-level study.
+The report lists both refinement blocks. Its preparation snapshot can differ
+from region dictionaries edited later; a mismatch is shown explicitly.
+See `cfmeshLayerGuide.md` for maintaining near-wall resolution during base-size
+studies and the limits of predicting y+ from mesh settings alone.
 
 ## Native mesher settings
 

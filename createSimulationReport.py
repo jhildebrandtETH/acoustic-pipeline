@@ -43,16 +43,26 @@ def create_simulation_report(
     quiet=False,
     aerodynamics_only=False,
     mesh_only=False,
+    status_callback=None,
 ):
+    from tools.common import emit_status
+
+    def progress(detail, value):
+        emit_status(status_callback, stage='report', detail=detail, progress=value)
+
     case_path = Path(case_path)
     report_dir = case_path / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    progress('reading mesh quality', 76)
     mesh_info = read_mesh_information(case_path)
     mesh_element_types = read_mesh_element_types(case_path)
     mesh_quality = read_mesh_quality(case_path, mesh_info)
+    progress('measuring first-cell thickness and plotting distribution', 78)
     layer_thickness = create_thickness_report_data(case_path)
+    progress('measuring cell volumes and plotting distribution', 83)
     mesh_volumes = create_volume_report_data(case_path)
+    progress('assembling report settings and pages', 88)
     settings = create_settings_report_data(case_path, rpm, mode, turbulence_model, mesh_only)
 
     if mesh_only:
@@ -89,6 +99,7 @@ def create_simulation_report(
         append_settings_report(c, settings)
         append_volume_report(c, mesh_volumes)
         append_thickness_report(c, layer_thickness)
+        progress('embedding mesh visualization images', 95)
         visualization_summary = append_visualization_report(c, case_path, mesh_only=True)
         c.save()
         if not quiet:
@@ -112,10 +123,12 @@ def create_simulation_report(
         log_file,
         control_dict_file,
     )
+    progress('computing Courant distribution', 89)
     courant_distribution = create_courant_report_data(
         case_path, timestep_courant_info['configured_max_co'],
     )
 
+    progress('plotting solver diagnostics and assembling PDF', 91)
     mesh_element_plot = create_mesh_element_plot(mesh_element_types, report_dir)
 
     yplus_plot, yplus_stats = create_yplus_distribution_plot(
@@ -614,6 +627,7 @@ def create_simulation_report(
                 c.drawString(50, h - 110, "Acoustic spectrum image was not found.")
                 c.drawString(50, h - 128, f"Expected file: {acoustic_plot}"[:95])
 
+    progress('embedding visualization images', 95)
     visualization_summary = append_visualization_report(c, case_path, mesh_only=False)
     c.save()
 

@@ -386,6 +386,9 @@ interpolationSchemes { default linear; } snGradSchemes { default corrected; }
     trimesh.Trimesh(vertices=vertices, faces=triangles, process=False).export(
         surface_directory / "propeller.stl"
     )
+    # The distance-refinement surface must use the same scaled geometry as the wall.
+    shutil.copy2(surface_directory / "propeller.stl",
+                 case / "cfmesh/rotor/constant/triSurface/propeller.stl")
     sphere_radius = None
     if acoustic_surface == "permeable":
         sphere_radius = sizing_radius

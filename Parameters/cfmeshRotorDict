@@ -9,12 +9,27 @@ edgeMeshRefinement
 }
 localRefinement
 {
+    // Outer distance band is applied in the boundary-refinement pass.
     propeller
     {
         additionalRefinementLevels $propellerLevel;
         refinementThickness $propellerRefinementThickness;
     }
     "rotaryRegion_.*" { additionalRefinementLevels $interfaceLevel; }
+}
+
+// Inner distance band is applied in a separate surface-refinement pass.
+// Do not put both bands in surfaceMeshRefinement: cfMesh combines the maximum
+// thickness of coincident surfaces with the finer level during that pass.
+// Both distances start at the propeller wall; transitions remain cell-sized.
+surfaceMeshRefinement
+{
+    propellerNear
+    {
+        surfaceFile "constant/triSurface/propeller.stl";
+        additionalRefinementLevels $propellerNearLevel;
+        refinementThickness $propellerNearRefinementThickness;
+    }
 }
 
 // Complete native cfMesh workflow: generate and refine propeller boundary layers.

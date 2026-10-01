@@ -1,6 +1,7 @@
 """Small native layer smoke test, independent of a production propeller mesh."""
 
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -18,13 +19,15 @@ class NativeLayerTests(unittest.TestCase):
             case = Path(tmp)
             shutil.copytree(ROOT / "Parameters", case / "Parameters")
             common = case / "Parameters/cfmeshCommon.cpp"
-            text = common.read_text().replace("baseCellSize 0.02;", "baseCellSize 0.1;")
-            text = text.replace("propellerLevel 5;", "propellerLevel 0;")
+            text = re.sub(r"baseCellSize\s+[^;]+;", "baseCellSize 0.1;", common.read_text())
+            text = re.sub(r"propellerLevel\s+[^;]+;", "propellerLevel 0;", text)
+            text = re.sub(r"propellerNearLevel\s+[^;]+;", "propellerNearLevel 1;", text)
             text = text.replace("layerOptimise 0;", "layerOptimise 1;")
             common.write_text(text)
             (case / "system").mkdir()
             (case / "constant/triSurface").mkdir(parents=True)
             cube = trimesh.creation.box(extents=[0.4, 0.4, 0.4])
+            cube.export(case / "constant/triSurface/propeller.stl")
             write_ftr(case / "constant/triSurface/domain.ftr", [
                 ("propeller", "wall", cube.vertices, cube.faces, False),
             ])

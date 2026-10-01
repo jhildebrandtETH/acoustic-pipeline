@@ -1,4 +1,4 @@
-from createSimulationReport import create_simulation_report
+from tools.report_worker import create_simulation_report
 from visualization import run_visualization
 from tools import MATPLOTLIB_LOCK
 from tools import emit_status
@@ -32,6 +32,7 @@ def postprocessing(
             create_simulation_report(
                 case_path=SIMULATION_WORKING_DIRECTORY, turbulence_model=TURBULENCE_MODEL,
                 rpm=RPM_COUNT, mode=MODE, quiet=True, mesh_only=True,
+                status_callback=STATUS_CALLBACK,
             )
         emit_status(STATUS_CALLBACK, stage="postprocessing", detail="postprocessing complete", progress=100.0)
         return None
@@ -89,6 +90,7 @@ def postprocessing(
             mode=MODE,
             quiet=True,
             aerodynamics_only=AERODYNAMICS_ONLY,
+            status_callback=STATUS_CALLBACK,
         )
 
     emit_status(

@@ -36,6 +36,31 @@ def write_boxes(root):
 
 
 class LayerThicknessTests(unittest.TestCase):
+    def test_polygon_prisms_with_oblique_opposite_faces(self):
+        # Triangle, quadrilateral and pentagon walls exercise different edge
+        # counts. Tangential displacement must not inflate normal thickness.
+        for polygon, area in (([(0, 0), (2, 0), (0, 1)], 1),
+                              ([(0, 0), (2, 0), (2, 1), (0, 1)], 2),
+                              ([(0, 0), (2, 0), (2, 1), (1, 2), (0, 1)], 3)):
+            with self.subTest(vertices=len(polygon)), tempfile.TemporaryDirectory() as tmp:
+                mesh = Path(tmp)/'constant/polyMesh'
+                mesh.mkdir(parents=True)
+                n = len(polygon)
+                points = [(x, y, 0) for x, y in polygon]
+                points += [(x+.3, y-.2, .002) for x, y in polygon]
+                faces = [list(reversed(range(n))), list(range(n, 2*n))]
+                faces += [[i, (i+1) % n, (i+1) % n+n, i+n] for i in range(n)]
+                lists = {
+                    'points': ['('+' '.join(map(str, p))+')' for p in points],
+                    'faces': [str(len(f))+'('+' '.join(map(str, f))+')' for f in faces],
+                    'owner': ['0']*len(faces), 'neighbour': [],
+                    'boundary': ['propeller { type wall; nFaces 1; startFace 0; }',
+                                 f'outer {{ type patch; nFaces {n+1}; startFace 1; }}'],
+                }
+                for name, values in lists.items():
+                    (mesh/name).write_text(str(len(values))+'\n(\n'+'\n'.join(values)+'\n)\n')
+                np.testing.assert_allclose(measure_first_cells(mesh)[:, 3:], [[area, 2]])
+
     def test_projected_geometry_and_area_weighted_mean(self):
         with tempfile.TemporaryDirectory() as tmp:
             rows = measure_first_cells(write_boxes(tmp))

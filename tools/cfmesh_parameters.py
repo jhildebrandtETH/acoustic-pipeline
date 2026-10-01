@@ -115,4 +115,41 @@ def resolution_settings(parameters):
             raise ValueError("Cell sizes must be positive and finite")
         base = sizes["background"]
         mode = "absolute"
-    return dict(mode=mode, base_cell_size_m=base, levels=levels, cell_sizes_m=sizes)
+    # Optional for older snapshots that predate the second propeller band.
+    near_level = optional(path, "propellerNearLevel")
+    near_distance = optional(path, "propellerNearRefinementThickness")
+    near = None
+    if near_level is not None or near_distance is not None:
+        if near_level is None or near_distance is None:
+            raise ValueError("propellerNearLevel and propellerNearRefinementThickness must both be supplied")
+        try:
+            level = int(near_level)
+            size = level_cell_size(base, level)
+        except ValueError as exc:
+            raise ValueError(f"Invalid propellerNearLevel: {near_level!r}: {exc}") from exc
+        try:
+            distance = float(near_distance)
+            if not math.isfinite(distance) or distance < 0:
+                raise ValueError("expected a finite nonnegative distance in metres")
+        except ValueError as exc:
+            raise ValueError(f"Invalid propellerNearRefinementThickness: {near_distance!r}: {exc}") from exc
+        levels["propellerNear"] = level
+        sizes["propellerNear"] = size
+        near = dict(level=level, refinement_thickness_m=distance, cell_size_m=size)
+    bands = None
+    outer_distance = optional(path, "propellerRefinementThickness")
+    if near is not None and outer_distance is not None:
+        try:
+            outer_distance = float(outer_distance)
+            if not math.isfinite(outer_distance) or outer_distance <= near['refinement_thickness_m']:
+                raise ValueError('outer distance must be finite and greater than the inner distance')
+        except ValueError as exc:
+            raise ValueError(f'Invalid propellerRefinementThickness: {outer_distance!r}: {exc}') from exc
+        if mode == 'levels' and near['level'] < levels['propeller']:
+            raise ValueError('propellerNearLevel must be at least propellerLevel for nested distance bands')
+        bands = dict(distance_reference='requested distance from the scaled propeller surface; native cell transitions apply',
+                     inner=dict(near),
+                     outer=dict(level=levels.get('propeller'), refinement_thickness_m=outer_distance,
+                                cell_size_m=sizes['propeller']))
+    return dict(mode=mode, base_cell_size_m=base, levels=levels, cell_sizes_m=sizes,
+                propeller_near_refinement=near, propeller_distance_bands=bands)

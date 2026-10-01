@@ -8,6 +8,30 @@ from tools.settings_report import create_settings_report_data, read_dictionary, 
 
 
 class SettingsReportTests(unittest.TestCase):
+    def test_overlapping_surface_refinement_and_stale_preparation_are_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mesh = root / 'cfmesh/rotor/system'
+            mesh.mkdir(parents=True)
+            (root/'cfmesh/geometry.json').write_text(json.dumps({'resolution': {'levels': {'propeller': 4}}}))
+            (mesh/'meshDict').write_text('''
+                localRefinement { propeller { additionalRefinementLevels 5; } }
+                surfaceMeshRefinement { propellerNear {
+                    surfaceFile "constant/triSurface/propeller.stl";
+                    additionalRefinementLevels 7; refinementThickness 0.00008;
+                } }
+            ''')
+            result = create_settings_report_data(root, 4000, 'AMI', 'kOmegaSST', True)
+            sections = str(result['sections'])
+            self.assertIn('Additional surface refinement', sections)
+            self.assertIn('propellerNear', sections)
+            self.assertIn('additionalRefinementLevels: 7', sections)
+            self.assertIn('Preparation snapshot has propeller level 4', sections)
+            self.assertIn('dictionary requests level 5', sections)
+            self.assertIn('can mask changes', sections)
+            self.assertIn('Inner band: level / distance from wall [m]', sections)
+            self.assertIn('7 / 0.00008', sections)
+
     def test_includes_overrides_and_inherited_solvers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

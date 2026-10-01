@@ -78,17 +78,8 @@ def measure_first_cells(mesh, patch='propeller'):
     def face(i):
         return vertices[offsets[i]:offsets[i+1]]
 
-    def geometry(i):
-        p = points[face(i)]
-        ref = p.mean(axis=0)
-        triangles = np.cross(p-ref, np.roll(p, -1, axis=0)-ref)/2
-        weights = np.linalg.norm(triangles, axis=1)
-        if not weights.sum():
-            return ref, np.zeros(3)
-        centre = np.average((p+np.roll(p, -1, axis=0)+ref)/3, weights=weights, axis=0)
-        return centre, triangles.sum(axis=0)
-
-    geometry_cache = {int(i): geometry(i) for i in np.union1d(owner_faces, neighbour_faces)}
+    from .mesh_geometry import face_geometry
+    geometry_cache = face_geometry(points, vertices, offsets, np.union1d(owner_faces, neighbour_faces))
     rows = []
     for i in range(start, start+count):
         centre, normal = geometry_cache[i]

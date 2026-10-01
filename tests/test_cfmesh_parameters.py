@@ -3,6 +3,7 @@
 import math
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -92,6 +93,43 @@ class ParameterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "baseCellSize"):
                 parameters.resolution_settings("unused")
 
+    def test_near_propeller_band_scales_independently_of_distance(self):
+        self.values.update(propellerNearLevel="6", propellerNearRefinementThickness="0.0005")
+        first = parameters.resolution_settings("unused")
+        self.assertAlmostEqual(first["cell_sizes_m"]["propellerNear"], 0.02 / 64)
+        self.assertEqual(first["levels"]["propellerNear"], 6)
+        self.values.update(baseCellSize="0.04", propellerNearLevel="7")
+        second = parameters.resolution_settings("unused")
+        self.assertEqual(first["cell_sizes_m"]["propellerNear"], second["cell_sizes_m"]["propellerNear"])
+        self.assertEqual(second["propeller_near_refinement"]["refinement_thickness_m"], 0.0005)
+        self.values["propellerNearLevel"] = "0"
+        self.values["propellerNearRefinementThickness"] = "0"
+        self.assertEqual(parameters.resolution_settings("unused")["levels"]["propellerNear"], 0)
+
+    def test_near_propeller_band_is_optional_but_requires_valid_pair(self):
+        self.assertIsNone(parameters.resolution_settings("unused")["propeller_near_refinement"])
+        for level, distance in (("6", None), (None, "0.001"), ("2.5", "0.001"),
+                                ("-1", "0.001"), ("99999", "0.001"),
+                                ("6", "-0.001"), ("6", "nan"), ("6", "inf")):
+            with self.subTest(level=level, distance=distance):
+                self.values.update(propellerNearLevel=level, propellerNearRefinementThickness=distance)
+                with self.assertRaisesRegex(ValueError, "propellerNear"):
+                    parameters.resolution_settings("unused")
+
+    def test_nested_distances_and_levels_are_validated(self):
+        self.values.update(propellerNearLevel='7', propellerNearRefinementThickness='0.00008',
+                           propellerRefinementThickness='0.003')
+        bands = parameters.resolution_settings('unused')['propeller_distance_bands']
+        self.assertEqual(bands['outer']['refinement_thickness_m'], 0.003)
+        self.assertEqual(bands['inner']['refinement_thickness_m'], 0.00008)
+        for distance in ('0', '-1', 'nan', 'inf', '0.00008', '0.00001'):
+            self.values['propellerRefinementThickness'] = distance
+            with self.assertRaisesRegex(ValueError, 'propellerRefinementThickness'):
+                parameters.resolution_settings('unused')
+        self.values.update(propellerRefinementThickness='0.003', propellerNearLevel='1')
+        with self.assertRaisesRegex(ValueError, 'propellerNearLevel must be at least'):
+            parameters.resolution_settings('unused')
+
 
 @unittest.skipUnless(os.environ.get("CFMESH_DOCKER_TESTS") == "1", "requires OpenFOAM Docker runtime")
 class NativeParameterTests(unittest.TestCase):
@@ -106,7 +144,8 @@ class NativeParameterTests(unittest.TestCase):
             # Editing the input file must not freeze the expressions in the derived file.
             self.assertAlmostEqual(float(query(folder / "cfmeshRotorDict", "maxCellSize")), 0.04)
             self.assertAlmostEqual(int(query(folder / "cfmeshRotorDict", "localRefinement/propeller/additionalRefinementLevels")), 6)
-            self.assertAlmostEqual(float(query(folder / "cfmeshSizes.cpp", "innerCylinderCellSize")), 0.01)
+            self.assertAlmostEqual(float(query(folder / "cfmeshSizes.cpp", "innerCylinderCellSize")),
+                                   0.04 / 2**int(query(common, "innerCylinderLevel")))
             self.assertAlmostEqual(float(query(folder / "cfmeshSizes.cpp", "acousticSphereCellSize")), 0.04)
             self.assertEqual(query(folder / "cfmeshStatorDict", "workflowControls/stopAfter"), "edgeExtraction")
 
@@ -120,6 +159,17 @@ class GeometryParameterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="cfmesh-geometry-") as tmp:
             case = Path(tmp) / "case"
             shutil.copytree(ROOT / "Parameters", case / "Parameters")
+            # Explicit fixture values keep geometry assertions independent of editable defaults.
+            for filename, values in (
+                ('cfmeshDomainDict', dict(lateralMargin=0.02, inletMargin=0.02, inletFraction=0.3)),
+                ('cfmeshCommon.cpp', dict(baseCellSize=0.02, innerCylinderLevel=2, propellerNearLevel=6,
+                                         propellerNearRefinementThickness=0.0005)),
+            ):
+                path = case / 'Parameters' / filename
+                text = path.read_text()
+                for key, value in values.items():
+                    text = re.sub(r'\b' + key + r'\s+[^;]+;', f'{key} {value};', text)
+                path.write_text(text)
             # A closed synthetic blade wider than the former 308 mm domain limit.
             source = Path(tmp) / "blade.stl"
             trimesh.creation.box(extents=[0.4, 0.01, 0.01]).export(source)
@@ -140,6 +190,12 @@ class GeometryParameterTests(unittest.TestCase):
             self.assertIn("additionalRefinementLevels 0;", generated)
             self.assertTrue((case / "Parameters/cfmeshDomain.generated").is_file())
             self.assertTrue((case / "constant/triSurface/permeableSurface.stl").is_file())
+            self.assertEqual((case / "constant/triSurface/propeller.stl").read_bytes(),
+                             (case / "cfmesh/rotor/constant/triSurface/propeller.stl").read_bytes())
+            self.assertEqual(geometry["resolution"]["levels"]["propellerNear"], 6)
+            self.assertEqual(geometry['resolution']['propeller_distance_bands']['inner']['refinement_thickness_m'], 0.0005)
+            self.assertAlmostEqual(float(query(case / "cfmesh/rotor/system/meshDict",
+                                              "surfaceMeshRefinement/propellerNear/refinementThickness")), 0.0005)
             for role in ("rotor", "stator"):
                 mesh = case / "cfmesh" / role / "system/meshDict"
                 self.assertAlmostEqual(float(query(mesh, "objectRefinements/acousticSurface/radius")), radius)

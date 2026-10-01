@@ -6,6 +6,7 @@
 #include "cfmeshCommon.cpp"
 backgroundCellSize $baseCellSize;
 propellerCellSize #eval "$baseCellSize / pow(2, $propellerLevel)";
+propellerNearCellSize #eval "$baseCellSize / pow(2, $propellerNearLevel)";
 interfaceCellSize #eval "$baseCellSize / pow(2, $interfaceLevel)";
 rotaryRegionCellSize #eval "$baseCellSize / pow(2, $rotaryRegionLevel)";
 innerCylinderCellSize #eval "$baseCellSize / pow(2, $innerCylinderLevel)";

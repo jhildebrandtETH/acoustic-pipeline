@@ -5,13 +5,18 @@
 // 10x7E target: fine propeller/inner wake with a coarse acoustic far field.
 // All nominal cell sizes scale with this base; see cfmeshLayerGuide.md.
 baseCellSize 0.022;
-propellerLevel 6;
+propellerLevel 4;
 interfaceLevel 3;
 rotaryRegionLevel 3;
 innerCylinderLevel 3;
 outerCylinderLevel 2;
 acousticSphereLevel 0;
-propellerRefinementThickness 0.002; // Fine-region width, not first-cell height.
+// Outer band: maximum distance from the propeller surface, in metres.
+// Keep this wider than the inner band and its cell-sized transition region.
+propellerRefinementThickness 0.003;
+
+propellerNearLevel 6;
+propellerNearRefinementThickness 0.0001; // Inner distance from the same surface [m].
 
 // Propeller layers: native cfMesh controls referenced by cfmeshRotorDict.
 propellerLayerCount 3; // Robust cfMesh stack; inspect measured thickness and solved y+.
@@ -30,4 +35,4 @@ layerSmoothNormalsIterations 10;
 layerMaxIterations 15; // Quality trial: increased from 5; compare full checkMesh results.
 layerFeatureSizeFactor 0.1; // Curvature-based thickness limit, 0 <= value < 1.
 layerRecalculateNormals 1;
-layerRelativeThicknessTolerance 0.08; // 0 <= value < 1; lower enforces smoother thickness.
+layerRelativeThicknessTolerance 0.08; // 0.08 <= value < 1; lower enforces smoother thickness.

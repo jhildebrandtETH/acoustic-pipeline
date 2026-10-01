@@ -172,15 +172,40 @@ def create_settings_report_data(case_path, rpm, mode, turbulence_model, mesh_onl
     common = read('Parameters/cfmeshCommon.cpp')
     section('Mesh geometry and resolution', 'cfmesh/geometry.json; Parameters/cfmeshCommon.cpp', [
         ('Domain / rotor [m]', {k: geometry[k] for k in ('box_min', 'box_max', 'rotor_radius_m', 'rotor_half_length_m') if k in geometry}),
-        ('Resolution', geometry.get('resolution') or {k: v for k, v in common.items() if 'Level' in k or 'CellSize' in k})])
+        ('Preparation resolution snapshot (see region dictionaries below for mesher settings)',
+         geometry.get('resolution') or {k: v for k, v in common.items() if 'Level' in k or 'CellSize' in k})])
     for role in ('rotor', 'stator'):
         source = f'cfmesh/{role}/system/meshDict'
         mesh = read(source)
         section(f'{role.title()} meshing', source, [
             ('Base / workflow', {k: mesh[k] for k in ('maxCellSize', 'minCellSize', 'workflowControls') if k in mesh}),
             ('Surface refinement', mesh.get('localRefinement')),
+            ('Additional surface refinement', mesh.get('surfaceMeshRefinement')),
             ('Layers', mesh.get('boundaryLayers')),
             ('Volume / edge refinement', {k: mesh[k] for k in ('objectRefinements', 'edgeMeshRefinement') if k in mesh})])
+        local = mesh.get('localRefinement', {}).get('propeller', {})
+        near = mesh.get('surfaceMeshRefinement', {}).get('propellerNear', {})
+        if local and near:
+            section(f'{role.title()} propeller distance bands', source, [
+                ('Outer band: level / distance from wall [m]',
+                 f"{local.get('additionalRefinementLevels', 'Not recorded')} / {local.get('refinementThickness', 'Not recorded')}"),
+                ('Inner band: level / distance from wall [m]',
+                 f"{near.get('additionalRefinementLevels', 'Not recorded')} / {near.get('refinementThickness', 'Not recorded')}"),
+                ('Distance meaning', 'Both distances start at the propeller surface, not at the edge of the inner band. '
+                 'The outer patch pass precedes the inner surface pass. Cell-sized transitions apply; '
+                 'these distances do not prescribe first-layer height.')])
+        prepared = geometry.get('resolution', {}).get('levels', {}).get('propeller')
+        actual = local.get('additionalRefinementLevels')
+        if prepared is not None and actual is not None and str(prepared) != str(actual):
+            section(f'{role.title()} resolution mismatch', source, [
+                ('Notice', f'Preparation snapshot has propeller level {prepared}, but the saved region '
+                 f'mesher dictionary requests level {actual}. These settings differ; use the region '
+                 'dictionary to inspect the mesher request. Saved files are not proof of when an edit was applied.')])
+        if mesh.get('surfaceMeshRefinement'):
+            section(f'{role.title()} overlapping refinement', source, [
+                ('Interpretation', 'Additional surface refinement can overlap local patch refinement. '
+                 'A finer overlapping request can mask changes to a coarser level; changing one level '
+                 'does not guarantee a different cell count.')])
     pipeline = read('cfmesh/pipeline-controls.json')
     section('Mesh improvement and acceptance', 'cfmesh/pipeline-controls.json', [('Controls', pipeline)])
     control = read('system/controlDict')

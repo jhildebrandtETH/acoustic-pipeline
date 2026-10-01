@@ -60,8 +60,10 @@ reduces the first thickness while retaining the outer edge of the stack.
 
 | Input | Effect |
 | --- | --- |
-| `propellerLevel` and `baseCellSize` | Set local surface cell size; this also influences the available native layer thickness and surface resolution |
+| `propellerLevel` and `baseCellSize` | Set the outer band's requested size; the finer inner band controls wall resolution where it overlaps |
 | `propellerRefinementThickness` | Width of the fine-cell region around the blade; this is NOT the boundary-layer stack thickness |
+| `propellerNearLevel` | Inner-band level relative to the background, not added to `propellerLevel`; must be at least the outer level |
+| `propellerNearRefinementThickness` | Distance in metres from the propeller surface for the additional band; 0 refines only intersected cells |
 | `propellerLayerCount` | Number of subdivisions in the native layer |
 | `propellerLayerThicknessRatio` | Growth between successive subdivisions; use a value at least 1 |
 | `propellerMaxFirstLayerThickness` | First-layer upper bound in metres; 1e30 is effectively uncapped for this domain |
@@ -73,6 +75,36 @@ reduces the first thickness while retaining the outer edge of the stack.
 | `layerRecalculateNormals` | Recomputes normal directions during optimisation |
 | `layerRelativeThicknessTolerance` | Limits neighbouring thickness variation; lower values enforce a smoother, potentially thinner layer; valid range 0 <= value < 1 |
 | `layerUntangle` | Native layer untangling switch; keep enabled for normal runs |
+
+### Thin propeller band for mesh studies
+
+The additional band uses `surfaceMeshRefinement` on a copy of the scaled
+propeller STL in the rotor case. It follows the blades and hub, creates no new
+wall patch, and overlaps the existing wider `propellerRefinementThickness`
+band, applied first through `localRefinement/propeller`. The defaults are
+inner level 7 to 0.08 mm and outer level 5 to 3 mm from the same wall.
+With a 22 mm base, the nominal inner size is 0.171875 mm and outer size is
+0.6875 mm. Both distance controls are in metres in `cfmeshCommon.cpp`.
+The actual band is limited by Cartesian cell sizes and refinement transitions;
+a very small distance does not prescribe an equally thin boundary-layer stack.
+
+To keep that nominal near-surface size when doubling `baseCellSize`, increase
+`propellerNearLevel` by one and keep its physical distance and layer settings
+fixed. For other scale factors, integer levels only approximate the old size.
+Keep the near level above the wider propeller level to obtain two distinct
+bands; other finer overlapping refinements can still control the local size.
+Do not put both bands in the same surface-refinement pass: coincident surface
+entries can combine the wider distance with the finer level. The outer distance
+must exceed the inner distance; the pipeline validates both distance and level ordering.
+
+This can help retain similar native layer thickness, but does not fix y+:
+wall distance, layer generation and the solved wall shear all matter. Compare
+the first-cell thickness report and solved yPlus distribution for every mesh.
+Holding wall resolution fixed while coarsening the outer mesh is an outer-mesh
+sensitivity study; test wall-normal resolution separately as well.
+
+The native surface-distance controls are documented in the
+[cfMesh user guide, surfaceMeshRefinement](https://cfmesh.com/wp-content/uploads/2015/09/User_Guide-cfMesh_v1.1.pdf).
 
 The optimisation parameters apply when `layerOptimise` is enabled. They belong
 to the rotor's `boundaryLayers/optimisationParameters` block and can also be
