@@ -684,7 +684,12 @@ def reactivate_failed_cases_for_resume(
             resume_status = case.get("resume_status")
             if order.get("meshing_backend") == "cfmesh-native-rotor-stator-v1":
                 case_path = Path(simulations_directory) / case["folder"]
-                if case.get("mesh_only") or not case_path.is_dir() or not get_safe_timestep(case_path):
+                # A completed mesh/solve is a durable reporting checkpoint.
+                # Mesh-only cases have no positive solver timestep to resume.
+                if not case_path.is_dir() or (
+                    resume_status != "solver_done"
+                    and (case.get("mesh_only") or not get_safe_timestep(case_path))
+                ):
                     resume_status = "pending"
 
             if resume_status not in {
